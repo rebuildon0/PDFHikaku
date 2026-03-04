@@ -112,6 +112,64 @@ const btnHelp = $("btn-help");
 const helpModal = $("help-modal");
 const btnHelpClose = $("btn-help-close");
 
+const btnDemo = $("btn-demo");
+
+// --- Demo ---
+btnDemo.addEventListener("click", async () => {
+    loading.hidden = false;
+    loadingText.textContent = "デモデータを読み込み中...";
+
+    try {
+        const [oldResp, newResp] = await Promise.all([
+            fetch("demo/old.pdf"),
+            fetch("demo/new.pdf"),
+        ]);
+
+        if (!oldResp.ok || !newResp.ok) {
+            throw new Error("デモファイルの取得に失敗しました");
+        }
+
+        const [oldBuf, newBuf] = await Promise.all([
+            oldResp.arrayBuffer(),
+            newResp.arrayBuffer(),
+        ]);
+
+        const oldData = new Uint8Array(oldBuf);
+        const newData = new Uint8Array(newBuf);
+
+        // Create File objects for state
+        state.oldFile = new File([oldBuf], "構造図面_Rev.A.pdf", { type: "application/pdf" });
+        state.newFile = new File([newBuf], "構造図面_Rev.B.pdf", { type: "application/pdf" });
+
+        state.oldPdf = await pdfjsLib.getDocument({ data: oldData }).promise;
+        state.newPdf = await pdfjsLib.getDocument({ data: newData }).promise;
+
+        state.totalPages = Math.max(state.oldPdf.numPages, state.newPdf.numPages);
+        state.currentPage = 1;
+        state.pageChangeData = [];
+        state.pageOffsets = {};
+
+        // Show result section
+        uploadSection.hidden = true;
+        resultSection.hidden = false;
+        document.body.classList.add("comparing");
+
+        // File info
+        infoOldName.textContent = state.oldFile.name;
+        infoNewName.textContent = state.newFile.name;
+
+        loadingText.textContent = "比較中...";
+        await renderCurrentPage();
+
+        // Generate thumbnails in background
+        generateThumbnails();
+    } catch (err) {
+        alert("デモの読み込みに失敗しました: " + err.message);
+    } finally {
+        loading.hidden = true;
+    }
+});
+
 // --- File Upload ---
 function setupUploadBox(box, fileInput, contentEl, doneEl, nameEl, removeBtn, side) {
     const handleFile = (file) => {
