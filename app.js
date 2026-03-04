@@ -10,7 +10,7 @@ const state = {
     newFile: null,
     currentPage: 1,
     totalPages: 1,
-    mode: "overlay", // overlay | sidebyside | diff | old_colored | new_colored
+    mode: "overlay",
     scale: 2,
     zoom: 1,
     // Pan
@@ -37,6 +37,16 @@ const state = {
     adjustStartY: 0,
     adjustStartOffsetX: 0,
     adjustStartOffsetY: 0,
+    applyOffsetToAll: false,
+    // Change regions
+    changeRegions: [],
+    currentChangeIndex: -1,
+    // Display options
+    fadeAmount: 0.7,
+    dilateChanges: true,
+    // Thumbnails
+    pageChangeData: [],
+    sidebarVisible: true,
 };
 
 function getPageOffset(page) {
@@ -69,8 +79,8 @@ const canvasOld = $("canvas-old");
 const canvasNew = $("canvas-new");
 const viewOverlay = $("view-overlay");
 const viewSideBySide = $("view-sidebyside");
-const diffPercent = $("diff-percent");
 const loading = $("loading");
+const loadingText = $("loading-text");
 const modeButtons = document.querySelectorAll(".btn-mode");
 const btnZoomIn = $("btn-zoom-in");
 const btnZoomOut = $("btn-zoom-out");
@@ -83,6 +93,24 @@ const btnAdjust = $("btn-adjust");
 const adjustPanel = $("adjust-panel");
 const adjustOffset = $("adjust-offset");
 const btnAdjustReset = $("btn-adjust-reset");
+const btnAutoAlign = $("btn-auto-align");
+const chkApplyAll = $("chk-apply-all");
+const diffBadge = $("diff-badge");
+const fadeSlider = $("fade-slider");
+const chkDilate = $("chk-dilate");
+const btnPrevChange = $("btn-prev-change");
+const btnNextChange = $("btn-next-change");
+const changeInfoEl = $("change-info");
+const thumbnailList = $("thumbnail-list");
+const changeSummary = $("change-summary");
+const btnToggleSidebar = $("btn-toggle-sidebar");
+const btnOpenSidebar = $("btn-open-sidebar");
+const thumbnailSidebar = $("thumbnail-sidebar");
+const infoOldName = $("info-old-name");
+const infoNewName = $("info-new-name");
+const btnHelp = $("btn-help");
+const helpModal = $("help-modal");
+const btnHelpClose = $("btn-help-close");
 
 // --- File Upload ---
 function setupUploadBox(box, fileInput, contentEl, doneEl, nameEl, removeBtn, side) {
@@ -144,6 +172,7 @@ setupUploadBox(uploadNew, fileNew, uploadContentNew, uploadDoneNew, fileNameNew,
 // --- Compare ---
 btnCompare.addEventListener("click", async () => {
     loading.hidden = false;
+    loadingText.textContent = "PDFを読み込み中...";
 
     try {
         const oldData = await readFile(state.oldFile);
@@ -154,11 +183,23 @@ btnCompare.addEventListener("click", async () => {
 
         state.totalPages = Math.max(state.oldPdf.numPages, state.newPdf.numPages);
         state.currentPage = 1;
+        state.pageChangeData = [];
+        state.pageOffsets = {};
 
+        // Show result section
         uploadSection.hidden = true;
         resultSection.hidden = false;
+        document.body.classList.add("comparing");
 
+        // File info
+        infoOldName.textContent = state.oldFile.name;
+        infoNewName.textContent = state.newFile.name;
+
+        loadingText.textContent = "比較中...";
         await renderCurrentPage();
+
+        // Generate thumbnails in background
+        generateThumbnails();
     } catch (err) {
         alert("PDFの読み込みに失敗しました: " + err.message);
     } finally {
@@ -176,11 +217,12 @@ function readFile(file) {
 }
 
 // --- Render PDF page to offscreen canvas ---
-async function renderPageToCanvas(pdf, pageNum) {
+async function renderPageToCanvas(pdf, pageNum, scale) {
     if (pageNum > pdf.numPages) return null;
+    scale = scale || state.scale;
 
     const page = await pdf.getPage(pageNum);
-    const viewport = page.getViewport({ scale: state.scale });
+    const viewport = page.getViewport({ scale });
 
     const canvas = document.createElement("canvas");
     canvas.width = viewport.width;
@@ -194,8 +236,11 @@ async function renderPageToCanvas(pdf, pageNum) {
     return canvas;
 }
 
-// --- Pixel Comparison (with offset support) ---
-function comparePages(oldCanvas, newCanvas, offsetX = 0, offsetY = 0) {
+// --- Pixel Comparison (with offset, dilation, fade support) ---
+function comparePages(oldCanvas, newCanvas, offsetX = 0, offsetY = 0, opts = {}) {
+    const fade = opts.fade !== undefined ? opts.fade : state.fadeAmount;
+    const dilate = opts.dilate !== undefined ? opts.dilate : state.dilateChanges;
+
     const width = Math.max(oldCanvas?.width || 0, newCanvas?.width || 0);
     const height = Math.max(oldCanvas?.height || 0, newCanvas?.height || 0);
 
@@ -208,7 +253,7 @@ function comparePages(oldCanvas, newCanvas, offsetX = 0, offsetY = 0) {
     if (oldCanvas) oldCtx.drawImage(oldCanvas, 0, 0);
     const oldData = oldCtx.getImageData(0, 0, width, height);
 
-    // New canvas data (offset applied via drawImage position)
+    // New canvas data (offset applied)
     const newCtx = document.createElement("canvas").getContext("2d");
     newCtx.canvas.width = width;
     newCtx.canvas.height = height;
@@ -226,15 +271,20 @@ function comparePages(oldCanvas, newCanvas, offsetX = 0, offsetY = 0) {
     const oldColoredData = tmpCtx.createImageData(width, height);
     const newColoredData = tmpCtx.createImageData(width, height);
 
+    // Change map for dilation (1 = changed)
+    const changeMap = dilate ? new Uint8Array(width * height) : null;
+    // Type map for dilation coloring (1=deleted, 2=added, 3=modified)
+    const typeMap = dilate ? new Uint8Array(width * height) : null;
+
     let diffPixels = 0;
     const totalPixels = width * height;
     const threshold = 30;
 
     for (let i = 0; i < oldData.data.length; i += 4) {
+        const px = (i / 4) | 0;
         const rOld = oldData.data[i];
         const gOld = oldData.data[i + 1];
         const bOld = oldData.data[i + 2];
-
         const rNew = newData.data[i];
         const gNew = newData.data[i + 1];
         const bNew = newData.data[i + 2];
@@ -243,105 +293,78 @@ function comparePages(oldCanvas, newCanvas, offsetX = 0, offsetY = 0) {
 
         if (diff > threshold) {
             diffPixels++;
+            if (changeMap) changeMap[px] = 1;
 
             const oldIsContent = (rOld + gOld + bOld) < 700;
             const newIsContent = (rNew + gNew + bNew) < 700;
 
             if (oldIsContent && !newIsContent) {
                 // 削除: 赤
-                resultData.data[i] = 239;
-                resultData.data[i + 1] = 68;
-                resultData.data[i + 2] = 68;
-                resultData.data[i + 3] = 200;
-
-                diffOnlyData.data[i] = 239;
-                diffOnlyData.data[i + 1] = 68;
-                diffOnlyData.data[i + 2] = 68;
-                diffOnlyData.data[i + 3] = 255;
-
-                // 旧図面: 削除部分を赤く強調
-                oldColoredData.data[i] = 239;
-                oldColoredData.data[i + 1] = Math.round(gOld * 0.3);
-                oldColoredData.data[i + 2] = Math.round(bOld * 0.3);
-                oldColoredData.data[i + 3] = 255;
-
-                // 新図面: 削除された部分を薄赤マーカー
-                newColoredData.data[i] = 255;
-                newColoredData.data[i + 1] = 220;
-                newColoredData.data[i + 2] = 220;
-                newColoredData.data[i + 3] = 255;
+                if (typeMap) typeMap[px] = 1;
+                resultData.data[i] = 239; resultData.data[i+1] = 68; resultData.data[i+2] = 68; resultData.data[i+3] = 200;
+                diffOnlyData.data[i] = 239; diffOnlyData.data[i+1] = 68; diffOnlyData.data[i+2] = 68; diffOnlyData.data[i+3] = 255;
+                oldColoredData.data[i] = 239; oldColoredData.data[i+1] = Math.round(gOld * 0.3); oldColoredData.data[i+2] = Math.round(bOld * 0.3); oldColoredData.data[i+3] = 255;
+                newColoredData.data[i] = 255; newColoredData.data[i+1] = 220; newColoredData.data[i+2] = 220; newColoredData.data[i+3] = 255;
             } else if (!oldIsContent && newIsContent) {
                 // 追加: 青
-                resultData.data[i] = 59;
-                resultData.data[i + 1] = 130;
-                resultData.data[i + 2] = 246;
-                resultData.data[i + 3] = 200;
-
-                diffOnlyData.data[i] = 59;
-                diffOnlyData.data[i + 1] = 130;
-                diffOnlyData.data[i + 2] = 246;
-                diffOnlyData.data[i + 3] = 255;
-
-                // 旧図面: 追加された部分を薄青マーカー
-                oldColoredData.data[i] = 220;
-                oldColoredData.data[i + 1] = 230;
-                oldColoredData.data[i + 2] = 255;
-                oldColoredData.data[i + 3] = 255;
-
-                // 新図面: 追加部分を青く強調
-                newColoredData.data[i] = Math.round(rNew * 0.3);
-                newColoredData.data[i + 1] = Math.round(gNew * 0.3);
-                newColoredData.data[i + 2] = 246;
-                newColoredData.data[i + 3] = 255;
+                if (typeMap) typeMap[px] = 2;
+                resultData.data[i] = 59; resultData.data[i+1] = 130; resultData.data[i+2] = 246; resultData.data[i+3] = 200;
+                diffOnlyData.data[i] = 59; diffOnlyData.data[i+1] = 130; diffOnlyData.data[i+2] = 246; diffOnlyData.data[i+3] = 255;
+                oldColoredData.data[i] = 220; oldColoredData.data[i+1] = 230; oldColoredData.data[i+2] = 255; oldColoredData.data[i+3] = 255;
+                newColoredData.data[i] = Math.round(rNew * 0.3); newColoredData.data[i+1] = Math.round(gNew * 0.3); newColoredData.data[i+2] = 246; newColoredData.data[i+3] = 255;
             } else {
                 // 変更: 紫
-                resultData.data[i] = 180;
-                resultData.data[i + 1] = 80;
-                resultData.data[i + 2] = 200;
-                resultData.data[i + 3] = 200;
-
-                diffOnlyData.data[i] = 180;
-                diffOnlyData.data[i + 1] = 80;
-                diffOnlyData.data[i + 2] = 200;
-                diffOnlyData.data[i + 3] = 255;
-
-                // 旧図面: 赤系で強調
-                oldColoredData.data[i] = 239;
-                oldColoredData.data[i + 1] = Math.round(gOld * 0.4);
-                oldColoredData.data[i + 2] = Math.round(bOld * 0.4);
-                oldColoredData.data[i + 3] = 255;
-
-                // 新図面: 青系で強調
-                newColoredData.data[i] = Math.round(rNew * 0.4);
-                newColoredData.data[i + 1] = Math.round(gNew * 0.4);
-                newColoredData.data[i + 2] = 246;
-                newColoredData.data[i + 3] = 255;
+                if (typeMap) typeMap[px] = 3;
+                resultData.data[i] = 180; resultData.data[i+1] = 80; resultData.data[i+2] = 200; resultData.data[i+3] = 200;
+                diffOnlyData.data[i] = 180; diffOnlyData.data[i+1] = 80; diffOnlyData.data[i+2] = 200; diffOnlyData.data[i+3] = 255;
+                oldColoredData.data[i] = 239; oldColoredData.data[i+1] = Math.round(gOld * 0.4); oldColoredData.data[i+2] = Math.round(bOld * 0.4); oldColoredData.data[i+3] = 255;
+                newColoredData.data[i] = Math.round(rNew * 0.4); newColoredData.data[i+1] = Math.round(gNew * 0.4); newColoredData.data[i+2] = 246; newColoredData.data[i+3] = 255;
             }
         } else {
-            // 変更なし
+            // 変更なし - fade適用
             const gray = Math.round((rNew + gNew + bNew) / 3);
-            const blended = Math.round(gray * 0.3 + 255 * 0.7);
-            resultData.data[i] = blended;
-            resultData.data[i + 1] = blended;
-            resultData.data[i + 2] = blended;
-            resultData.data[i + 3] = 255;
+            const blended = Math.round(gray * (1 - fade) + 255 * fade);
+            resultData.data[i] = blended; resultData.data[i+1] = blended; resultData.data[i+2] = blended; resultData.data[i+3] = 255;
+            diffOnlyData.data[i] = 255; diffOnlyData.data[i+1] = 255; diffOnlyData.data[i+2] = 255; diffOnlyData.data[i+3] = 255;
+            oldColoredData.data[i] = rOld; oldColoredData.data[i+1] = gOld; oldColoredData.data[i+2] = bOld; oldColoredData.data[i+3] = 255;
+            newColoredData.data[i] = rNew; newColoredData.data[i+1] = gNew; newColoredData.data[i+2] = bNew; newColoredData.data[i+3] = 255;
+        }
+    }
 
-            diffOnlyData.data[i] = 255;
-            diffOnlyData.data[i + 1] = 255;
-            diffOnlyData.data[i + 2] = 255;
-            diffOnlyData.data[i + 3] = 255;
-
-            // 旧図面: そのまま表示
-            oldColoredData.data[i] = rOld;
-            oldColoredData.data[i + 1] = gOld;
-            oldColoredData.data[i + 2] = bOld;
-            oldColoredData.data[i + 3] = 255;
-
-            // 新図面: そのまま表示
-            newColoredData.data[i] = rNew;
-            newColoredData.data[i + 1] = gNew;
-            newColoredData.data[i + 2] = bNew;
-            newColoredData.data[i + 3] = 255;
+    // Dilation: expand changed pixels by 1px for visibility
+    if (dilate && changeMap) {
+        const dilateTargets = [resultData, diffOnlyData];
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                const idx = y * width + x;
+                if (changeMap[idx]) continue; // already changed
+                // Check 4-neighbors
+                let neighborType = 0;
+                for (const [dx, dy] of [[-1,0],[1,0],[0,-1],[0,1]]) {
+                    const nx = x + dx, ny = y + dy;
+                    if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                        const nIdx = ny * width + nx;
+                        if (changeMap[nIdx]) {
+                            neighborType = typeMap[nIdx];
+                            break;
+                        }
+                    }
+                }
+                if (neighborType) {
+                    const i = idx * 4;
+                    let r, g, b;
+                    if (neighborType === 1) { r = 239; g = 68; b = 68; }
+                    else if (neighborType === 2) { r = 59; g = 130; b = 246; }
+                    else { r = 180; g = 80; b = 200; }
+                    // Apply at reduced opacity for border effect
+                    for (const target of dilateTargets) {
+                        target.data[i] = Math.round(target.data[i] * 0.5 + r * 0.5);
+                        target.data[i+1] = Math.round(target.data[i+1] * 0.5 + g * 0.5);
+                        target.data[i+2] = Math.round(target.data[i+2] * 0.5 + b * 0.5);
+                        target.data[i+3] = 255;
+                    }
+                }
+            }
         }
     }
 
@@ -350,25 +373,178 @@ function comparePages(oldCanvas, newCanvas, offsetX = 0, offsetY = 0) {
     return { resultData, diffOnlyData, oldColoredData, newColoredData, width, height, percent };
 }
 
+// --- Change Region Detection ---
+function detectChangeRegions(diffOnlyData, width, height) {
+    const cellSize = 8;
+    const cols = Math.ceil(width / cellSize);
+    const rows = Math.ceil(height / cellSize);
+    const grid = new Uint8Array(cols * rows);
+
+    // Mark cells containing changed pixels
+    const data = diffOnlyData.data;
+    for (let y = 0; y < height; y++) {
+        const row = (y / cellSize) | 0;
+        for (let x = 0; x < width; x++) {
+            const i = (y * width + x) * 4;
+            if (data[i] !== 255 || data[i+1] !== 255 || data[i+2] !== 255) {
+                grid[row * cols + ((x / cellSize) | 0)] = 1;
+            }
+        }
+    }
+
+    // Connected component labeling (BFS)
+    const visited = new Uint8Array(cols * rows);
+    const regions = [];
+
+    for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+            const gIdx = r * cols + c;
+            if (!grid[gIdx] || visited[gIdx]) continue;
+
+            const queue = [[r, c]];
+            visited[gIdx] = 1;
+            let minR = r, maxR = r, minC = c, maxC = c;
+            let head = 0;
+
+            while (head < queue.length) {
+                const [cr, cc] = queue[head++];
+                if (cr < minR) minR = cr;
+                if (cr > maxR) maxR = cr;
+                if (cc < minC) minC = cc;
+                if (cc > maxC) maxC = cc;
+
+                for (const [dr, dc] of [[-1,0],[1,0],[0,-1],[0,1]]) {
+                    const nr = cr + dr, nc = cc + dc;
+                    if (nr >= 0 && nr < rows && nc >= 0 && nc < cols) {
+                        const nIdx = nr * cols + nc;
+                        if (grid[nIdx] && !visited[nIdx]) {
+                            visited[nIdx] = 1;
+                            queue.push([nr, nc]);
+                        }
+                    }
+                }
+            }
+
+            regions.push({
+                x: minC * cellSize,
+                y: minR * cellSize,
+                w: (maxC - minC + 1) * cellSize,
+                h: (maxR - minR + 1) * cellSize,
+            });
+        }
+    }
+
+    // Merge nearby regions
+    const gap = 24;
+    let merged = true;
+    while (merged) {
+        merged = false;
+        for (let i = 0; i < regions.length; i++) {
+            for (let j = i + 1; j < regions.length; j++) {
+                const a = regions[i], b = regions[j];
+                if (a.x - gap <= b.x + b.w && b.x - gap <= a.x + a.w &&
+                    a.y - gap <= b.y + b.h && b.y - gap <= a.y + a.h) {
+                    const nx = Math.min(a.x, b.x);
+                    const ny = Math.min(a.y, b.y);
+                    regions[i] = {
+                        x: nx, y: ny,
+                        w: Math.max(a.x + a.w, b.x + b.w) - nx,
+                        h: Math.max(a.y + a.h, b.y + b.h) - ny,
+                    };
+                    regions.splice(j, 1);
+                    merged = true;
+                    break;
+                }
+            }
+            if (merged) break;
+        }
+    }
+
+    // Sort top-to-bottom, left-to-right
+    regions.sort((a, b) => a.y - b.y || a.x - b.x);
+    return regions;
+}
+
+// --- Draw change region overlays ---
+function drawChangeRegionOverlays() {
+    if (!state.changeRegions.length) return;
+    const ctx = canvasResult.getContext("2d");
+    ctx.save();
+    ctx.strokeStyle = "#f59e0b";
+    ctx.lineWidth = 3;
+    ctx.setLineDash([6, 4]);
+
+    state.changeRegions.forEach((r, i) => {
+        if (i === state.currentChangeIndex) {
+            ctx.strokeStyle = "#ef4444";
+            ctx.lineWidth = 4;
+            ctx.setLineDash([]);
+        } else {
+            ctx.strokeStyle = "#f59e0b";
+            ctx.lineWidth = 3;
+            ctx.setLineDash([6, 4]);
+        }
+        const pad = 6;
+        ctx.strokeRect(r.x - pad, r.y - pad, r.w + pad * 2, r.h + pad * 2);
+    });
+    ctx.restore();
+}
+
+// --- Navigate to change region ---
+function navigateToChangeRegion(index) {
+    if (!state.changeRegions.length) return;
+    if (index < 0) index = state.changeRegions.length - 1;
+    if (index >= state.changeRegions.length) index = 0;
+
+    state.currentChangeIndex = index;
+    updateChangeNav();
+
+    // Redraw to update highlight
+    applyMode();
+
+    // Scroll viewport to center the region
+    const r = state.changeRegions[index];
+    const zoomRatio = state.zoom / state.scale;
+    const viewW = canvasViewport.clientWidth;
+    const viewH = canvasViewport.clientHeight;
+    const cx = (r.x + r.w / 2) * zoomRatio + 8; // 8 = padding
+    const cy = (r.y + r.h / 2) * zoomRatio + 8;
+
+    canvasViewport.scrollTo({
+        left: cx - viewW / 2,
+        top: cy - viewH / 2,
+        behavior: "smooth",
+    });
+}
+
+function updateChangeNav() {
+    const n = state.changeRegions.length;
+    const cur = state.currentChangeIndex;
+    changeInfoEl.textContent = n > 0 ? `変更 ${cur + 1}/${n}` : "変更 0/0";
+    btnPrevChange.disabled = n === 0;
+    btnNextChange.disabled = n === 0;
+}
+
 // --- Render Current Page ---
 async function renderCurrentPage() {
     loading.hidden = false;
+    loadingText.textContent = `ページ ${state.currentPage} を比較中...`;
 
     try {
         const oldCanvas = await renderPageToCanvas(state.oldPdf, state.currentPage);
         const newCanvas = await renderPageToCanvas(state.newPdf, state.currentPage);
 
-        // Store for re-comparison (position adjustment)
         state.renderedOldCanvas = oldCanvas;
         state.renderedNewCanvas = newCanvas;
 
         runComparison();
 
-        // UI更新
+        // UI
         pageInfo.textContent = `${state.currentPage} / ${state.totalPages}`;
         btnPrev.disabled = state.currentPage <= 1;
         btnNext.disabled = state.currentPage >= state.totalPages;
         updateAdjustDisplay();
+        updateActiveThumbnail();
     } catch (err) {
         alert("ページの比較中にエラーが発生しました: " + err.message);
     } finally {
@@ -376,7 +552,7 @@ async function renderCurrentPage() {
     }
 }
 
-// --- Run comparison with current offset (no PDF re-render needed) ---
+// --- Run comparison with current offset ---
 function runComparison() {
     const oldCanvas = state.renderedOldCanvas;
     const newCanvas = state.renderedNewCanvas;
@@ -397,10 +573,9 @@ function runComparison() {
     state.canvasWidth = width;
     state.canvasHeight = height;
 
-    // サイドバイサイド用
+    // Side-by-side canvases
     const drawPlaceholder = (c, w, h) => {
-        c.width = w;
-        c.height = h;
+        c.width = w; c.height = h;
         const ctx = c.getContext("2d");
         ctx.fillStyle = "#f1f5f9";
         ctx.fillRect(0, 0, w, h);
@@ -426,8 +601,13 @@ function runComparison() {
         drawPlaceholder(canvasNew, width, height);
     }
 
+    // Detect change regions
+    state.changeRegions = detectChangeRegions(diffOnlyData, width, height);
+    state.currentChangeIndex = state.changeRegions.length > 0 ? 0 : -1;
+    updateChangeNav();
+
     applyMode();
-    diffPercent.textContent = `差分: ${percent}% のピクセルが変更されています`;
+    diffBadge.textContent = `差分: ${percent}%`;
 }
 
 // --- Apply View Mode ---
@@ -440,18 +620,22 @@ function applyMode() {
         viewOverlay.hidden = false;
         viewSideBySide.hidden = true;
         ctx.putImageData(state.overlayData, 0, 0);
+        drawChangeRegionOverlays();
     } else if (state.mode === "diff") {
         viewOverlay.hidden = false;
         viewSideBySide.hidden = true;
         ctx.putImageData(state.diffOnlyData, 0, 0);
+        drawChangeRegionOverlays();
     } else if (state.mode === "old_colored") {
         viewOverlay.hidden = false;
         viewSideBySide.hidden = true;
         ctx.putImageData(state.oldColoredData, 0, 0);
+        drawChangeRegionOverlays();
     } else if (state.mode === "new_colored") {
         viewOverlay.hidden = false;
         viewSideBySide.hidden = true;
         ctx.putImageData(state.newColoredData, 0, 0);
+        drawChangeRegionOverlays();
     } else {
         // sidebyside
         viewOverlay.hidden = true;
@@ -478,9 +662,22 @@ btnNext.addEventListener("click", () => {
 btnBack.addEventListener("click", () => {
     resultSection.hidden = true;
     uploadSection.hidden = false;
+    document.body.classList.remove("comparing");
     state.oldPdf = null;
     state.newPdf = null;
+    state.pageChangeData = [];
+    thumbnailList.innerHTML = "";
+    changeSummary.textContent = "";
     exitAdjustMode();
+});
+
+// Change navigation
+btnPrevChange.addEventListener("click", () => {
+    navigateToChangeRegion(state.currentChangeIndex - 1);
+});
+
+btnNextChange.addEventListener("click", () => {
+    navigateToChangeRegion(state.currentChangeIndex + 1);
 });
 
 // --- Mode Switching ---
@@ -521,24 +718,18 @@ btnZoomFit.addEventListener("click", () => {
     canvasViewport.scrollTo(0, 0);
 });
 
-// マウスホイールでズーム（Ctrl+ホイール）
-canvasViewport.addEventListener(
-    "wheel",
-    (e) => {
-        if (!e.ctrlKey) return;
-        e.preventDefault();
-        const delta = e.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP;
-        setZoom(state.zoom + delta);
-    },
-    { passive: false }
-);
+canvasViewport.addEventListener("wheel", (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP;
+    setZoom(state.zoom + delta);
+}, { passive: false });
 
 // --- Pan / Adjust Drag ---
 canvasViewport.addEventListener("mousedown", (e) => {
     if (e.button !== 0) return;
 
     if (state.adjustMode) {
-        // 位置調整モード: ドラッグで新図面の位置を調整
         state.isAdjusting = true;
         state.adjustStartX = e.clientX;
         state.adjustStartY = e.clientY;
@@ -548,7 +739,6 @@ canvasViewport.addEventListener("mousedown", (e) => {
         canvasViewport.classList.add("grabbing");
         e.preventDefault();
     } else {
-        // パンモード
         state.isPanning = true;
         state.panStartX = e.clientX;
         state.panStartY = e.clientY;
@@ -562,12 +752,17 @@ document.addEventListener("mousemove", (e) => {
     if (state.isAdjusting) {
         const dx = (e.clientX - state.adjustStartX) / state.zoom;
         const dy = (e.clientY - state.adjustStartY) / state.zoom;
-        state.pageOffsets[state.currentPage] = {
+        const newOffset = {
             x: state.adjustStartOffsetX + dx,
             y: state.adjustStartOffsetY + dy,
         };
+        state.pageOffsets[state.currentPage] = newOffset;
+        if (state.applyOffsetToAll) {
+            for (let p = 1; p <= state.totalPages; p++) {
+                state.pageOffsets[p] = { ...newOffset };
+            }
+        }
         updateAdjustDisplay();
-        // ドラッグ中は軽量プレビュー
         renderAdjustPreview();
     } else if (state.isPanning) {
         const dx = e.clientX - state.panStartX;
@@ -581,7 +776,6 @@ document.addEventListener("mouseup", () => {
     if (state.isAdjusting) {
         state.isAdjusting = false;
         canvasViewport.classList.remove("grabbing");
-        // ドラッグ終了: フル比較実行
         runComparison();
     }
     if (state.isPanning) {
@@ -607,17 +801,28 @@ function exitAdjustMode() {
 }
 
 btnAdjust.addEventListener("click", () => {
-    if (state.adjustMode) {
-        exitAdjustMode();
-    } else {
-        enterAdjustMode();
-    }
+    state.adjustMode ? exitAdjustMode() : enterAdjustMode();
 });
 
 btnAdjustReset.addEventListener("click", () => {
     state.pageOffsets[state.currentPage] = { x: 0, y: 0 };
+    if (state.applyOffsetToAll) {
+        for (let p = 1; p <= state.totalPages; p++) {
+            state.pageOffsets[p] = { x: 0, y: 0 };
+        }
+    }
     updateAdjustDisplay();
     runComparison();
+});
+
+chkApplyAll.addEventListener("change", () => {
+    state.applyOffsetToAll = chkApplyAll.checked;
+    if (state.applyOffsetToAll) {
+        const offset = getPageOffset(state.currentPage);
+        for (let p = 1; p <= state.totalPages; p++) {
+            state.pageOffsets[p] = { ...offset };
+        }
+    }
 });
 
 function updateAdjustDisplay() {
@@ -625,7 +830,7 @@ function updateAdjustDisplay() {
     adjustOffset.textContent = `X: ${Math.round(offset.x)}　Y: ${Math.round(offset.y)}`;
 }
 
-// ドラッグ中の軽量プレビュー（半透明重ね合わせ）
+// Lightweight preview during drag
 function renderAdjustPreview() {
     if (!state.renderedOldCanvas && !state.renderedNewCanvas) return;
 
@@ -644,29 +849,264 @@ function renderAdjustPreview() {
     state.canvasHeight = height;
     const ctx = canvasResult.getContext("2d");
 
-    // 白背景
     ctx.fillStyle = "white";
     ctx.fillRect(0, 0, width, height);
 
-    // 旧図面を半透明で描画
     ctx.globalAlpha = 0.5;
     if (oldC) ctx.drawImage(oldC, 0, 0);
-
-    // 新図面をオフセット付きで半透明描画
     ctx.globalAlpha = 0.5;
     if (newC) ctx.drawImage(newC, ox, oy);
-
     ctx.globalAlpha = 1.0;
 
-    // overlay表示に切替
     viewOverlay.hidden = false;
     viewSideBySide.hidden = true;
     applyZoomToCanvases();
 }
 
+// --- Auto-Alignment ---
+btnAutoAlign.addEventListener("click", () => {
+    if (!state.renderedOldCanvas || !state.renderedNewCanvas) return;
+
+    loading.hidden = false;
+    loadingText.textContent = "自動位置合わせ中...";
+
+    // Use setTimeout to allow the loading overlay to render
+    setTimeout(() => {
+        try {
+            const offset = autoAlignPages(state.renderedOldCanvas, state.renderedNewCanvas);
+            state.pageOffsets[state.currentPage] = offset;
+            if (state.applyOffsetToAll) {
+                for (let p = 1; p <= state.totalPages; p++) {
+                    state.pageOffsets[p] = { ...offset };
+                }
+            }
+            updateAdjustDisplay();
+            runComparison();
+        } catch (err) {
+            alert("自動位置合わせに失敗しました: " + err.message);
+        } finally {
+            loading.hidden = true;
+        }
+    }, 50);
+});
+
+function autoAlignPages(oldCanvas, newCanvas) {
+    const targetWidth = 400;
+    const scaleDown = targetWidth / Math.max(oldCanvas.width, 1);
+    const tw = Math.round(oldCanvas.width * scaleDown);
+    const th = Math.round(oldCanvas.height * scaleDown);
+
+    function downsampleGray(canvas) {
+        const c = document.createElement("canvas");
+        c.width = tw; c.height = th;
+        const ctx = c.getContext("2d");
+        ctx.drawImage(canvas, 0, 0, tw, th);
+        const data = ctx.getImageData(0, 0, tw, th).data;
+        const gray = new Float32Array(tw * th);
+        for (let i = 0; i < tw * th; i++) {
+            gray[i] = data[i*4] * 0.299 + data[i*4+1] * 0.587 + data[i*4+2] * 0.114;
+        }
+        return gray;
+    }
+
+    const gOld = downsampleGray(oldCanvas);
+    const gNew = downsampleGray(newCanvas);
+
+    const searchRange = 25;
+    let bestSAD = Infinity, bestOx = 0, bestOy = 0;
+
+    // Coarse search (step 2)
+    for (let oy = -searchRange; oy <= searchRange; oy += 2) {
+        for (let ox = -searchRange; ox <= searchRange; ox += 2) {
+            let sad = 0, count = 0;
+            const yStart = Math.max(0, -oy), yEnd = Math.min(th, th - oy);
+            const xStart = Math.max(0, -ox), xEnd = Math.min(tw, tw - ox);
+            for (let y = yStart; y < yEnd; y++) {
+                for (let x = xStart; x < xEnd; x++) {
+                    sad += Math.abs(gOld[y * tw + x] - gNew[(y + oy) * tw + (x + ox)]);
+                    count++;
+                }
+            }
+            if (count > 0) sad /= count;
+            if (sad < bestSAD) { bestSAD = sad; bestOx = ox; bestOy = oy; }
+        }
+    }
+
+    // Fine search (step 1)
+    const coarseOx = bestOx, coarseOy = bestOy;
+    for (let oy = coarseOy - 3; oy <= coarseOy + 3; oy++) {
+        for (let ox = coarseOx - 3; ox <= coarseOx + 3; ox++) {
+            let sad = 0, count = 0;
+            const yStart = Math.max(0, -oy), yEnd = Math.min(th, th - oy);
+            const xStart = Math.max(0, -ox), xEnd = Math.min(tw, tw - ox);
+            for (let y = yStart; y < yEnd; y++) {
+                for (let x = xStart; x < xEnd; x++) {
+                    sad += Math.abs(gOld[y * tw + x] - gNew[(y + oy) * tw + (x + ox)]);
+                    count++;
+                }
+            }
+            if (count > 0) sad /= count;
+            if (sad < bestSAD) { bestSAD = sad; bestOx = ox; bestOy = oy; }
+        }
+    }
+
+    // Convert back to original scale (CSS pixels, not canvas pixels)
+    return {
+        x: Math.round(bestOx / scaleDown / state.scale),
+        y: Math.round(bestOy / scaleDown / state.scale),
+    };
+}
+
+// --- Display Options ---
+fadeSlider.addEventListener("input", () => {
+    state.fadeAmount = fadeSlider.value / 100;
+    runComparison();
+});
+
+chkDilate.addEventListener("change", () => {
+    state.dilateChanges = chkDilate.checked;
+    runComparison();
+});
+
+// --- Thumbnail Generation ---
+function generateThumbnails() {
+    thumbnailList.innerHTML = "";
+    state.pageChangeData = [];
+
+    // Create placeholder items
+    for (let p = 1; p <= state.totalPages; p++) {
+        const item = document.createElement("div");
+        item.className = "thumb-item" + (p === state.currentPage ? " active" : "");
+        item.dataset.page = p;
+
+        const canvas = document.createElement("canvas");
+        canvas.width = 1;
+        canvas.height = 1;
+        item.appendChild(canvas);
+
+        const label = document.createElement("div");
+        label.className = "thumb-label";
+        label.innerHTML = `<span class="thumb-page-num">P${p}</span><span class="thumb-change-dot pending"></span>`;
+        item.appendChild(label);
+
+        item.addEventListener("click", () => {
+            state.currentPage = parseInt(item.dataset.page);
+            renderCurrentPage();
+        });
+
+        thumbnailList.appendChild(item);
+        state.pageChangeData.push({ hasChanges: null, percent: 0 });
+    }
+
+    // Generate in background batches
+    generateThumbnailBatch(1);
+}
+
+async function generateThumbnailBatch(startPage) {
+    const batchSize = 3;
+    const endPage = Math.min(startPage + batchSize - 1, state.totalPages);
+
+    for (let p = startPage; p <= endPage; p++) {
+        try {
+            const thumbScale = 0.3;
+            const oldC = await renderPageToCanvas(state.oldPdf, p, thumbScale);
+            const newC = await renderPageToCanvas(state.newPdf, p, thumbScale);
+
+            const offset = getPageOffset(p);
+            const ox = Math.round(offset.x * thumbScale);
+            const oy = Math.round(offset.y * thumbScale);
+
+            const result = comparePages(oldC, newC, ox, oy, { fade: 0.7, dilate: false });
+            const hasChanges = parseFloat(result.percent) > 0;
+
+            state.pageChangeData[p - 1] = { hasChanges, percent: result.percent };
+
+            // Draw thumbnail
+            const item = thumbnailList.children[p - 1];
+            if (!item) continue;
+
+            const canvas = item.querySelector("canvas");
+            canvas.width = result.width;
+            canvas.height = result.height;
+            canvas.getContext("2d").putImageData(result.resultData, 0, 0);
+
+            // Update indicator
+            const dot = item.querySelector(".thumb-change-dot");
+            dot.className = "thumb-change-dot " + (hasChanges ? "changed" : "unchanged");
+            item.classList.toggle("has-changes", hasChanges);
+            item.classList.toggle("no-changes", !hasChanges);
+
+            // Update summary
+            updateChangeSummary();
+        } catch (e) {
+            // Skip failed thumbnail
+        }
+    }
+
+    // Schedule next batch
+    if (endPage < state.totalPages) {
+        setTimeout(() => generateThumbnailBatch(endPage + 1), 0);
+    }
+}
+
+function updateChangeSummary() {
+    const scanned = state.pageChangeData.filter(d => d.hasChanges !== null).length;
+    const changed = state.pageChangeData.filter(d => d.hasChanges === true).length;
+
+    if (scanned === 0) {
+        changeSummary.textContent = "";
+        return;
+    }
+
+    const changedPages = [];
+    state.pageChangeData.forEach((d, i) => {
+        if (d.hasChanges) changedPages.push(i + 1);
+    });
+
+    if (scanned < state.totalPages) {
+        changeSummary.textContent = `解析中... ${scanned}/${state.totalPages}ページ完了 (${changed}ページに変更)`;
+    } else {
+        changeSummary.textContent = changed > 0
+            ? `${state.totalPages}ページ中 ${changed}ページに変更あり: P${changedPages.join(", P")}`
+            : `${state.totalPages}ページ中 変更なし`;
+    }
+}
+
+function updateActiveThumbnail() {
+    const items = thumbnailList.querySelectorAll(".thumb-item");
+    items.forEach((item, i) => {
+        item.classList.toggle("active", i + 1 === state.currentPage);
+    });
+
+    // Scroll active thumbnail into view
+    const activeItem = thumbnailList.querySelector(".thumb-item.active");
+    if (activeItem) {
+        activeItem.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+}
+
+// --- Sidebar ---
+btnToggleSidebar.addEventListener("click", () => toggleSidebar(false));
+btnOpenSidebar.addEventListener("click", () => toggleSidebar(true));
+
+function toggleSidebar(show) {
+    if (show === undefined) show = !state.sidebarVisible;
+    state.sidebarVisible = show;
+    thumbnailSidebar.classList.toggle("collapsed", !show);
+    btnOpenSidebar.hidden = show;
+}
+
+// --- Help Modal ---
+btnHelp.addEventListener("click", () => { helpModal.hidden = false; });
+btnHelpClose.addEventListener("click", () => { helpModal.hidden = true; });
+helpModal.addEventListener("click", (e) => {
+    if (e.target === helpModal) helpModal.hidden = true;
+});
+
 // --- PDF Export ---
 btnExportPdf.addEventListener("click", async () => {
     loading.hidden = false;
+    loadingText.textContent = "PDF出力中...";
 
     try {
         const { jsPDF } = window.jspdf;
@@ -683,11 +1123,9 @@ btnExportPdf.addEventListener("click", async () => {
         });
 
         for (let p = 1; p <= state.totalPages; p++) {
+            loadingText.textContent = `PDF出力中... (${p}/${state.totalPages})`;
             if (p > 1) {
-                pdf.addPage(
-                    [pageWidth, pageHeight],
-                    pageWidth > pageHeight ? "landscape" : "portrait"
-                );
+                pdf.addPage([pageWidth, pageHeight], pageWidth > pageHeight ? "landscape" : "portrait");
             }
 
             const oldCanvas = await renderPageToCanvas(state.oldPdf, p);
@@ -707,15 +1145,9 @@ btnExportPdf.addEventListener("click", async () => {
                 ctx.fillStyle = "white";
                 ctx.fillRect(0, 0, w, h);
                 if (oldCanvas) ctx.drawImage(oldCanvas, 0, 0);
-                if (newCanvas)
-                    ctx.drawImage(newCanvas, (oldCanvas?.width || 0) + 20, 0);
+                if (newCanvas) ctx.drawImage(newCanvas, (oldCanvas?.width || 0) + 20, 0);
             } else {
-                const result = comparePages(
-                    oldCanvas,
-                    newCanvas,
-                    canvasOffsetX,
-                    canvasOffsetY
-                );
+                const result = comparePages(oldCanvas, newCanvas, canvasOffsetX, canvasOffsetY);
                 exportCanvas = document.createElement("canvas");
                 exportCanvas.width = result.width;
                 exportCanvas.height = result.height;
@@ -744,52 +1176,36 @@ btnExportPdf.addEventListener("click", async () => {
 
 // --- Keyboard ---
 document.addEventListener("keydown", (e) => {
+    // Don't handle keys when modal is open
+    if (!helpModal.hidden) return;
     if (resultSection.hidden) return;
 
-    // 位置調整モードの矢印キー操作
+    // Adjust mode arrow keys
     if (state.adjustMode) {
         const step = e.shiftKey ? 10 : 1;
         const offset = getPageOffset(state.currentPage);
         let changed = false;
+        let newOffset = { ...offset };
 
-        if (e.key === "ArrowLeft") {
-            e.preventDefault();
-            state.pageOffsets[state.currentPage] = {
-                x: offset.x - step,
-                y: offset.y,
-            };
-            changed = true;
-        } else if (e.key === "ArrowRight") {
-            e.preventDefault();
-            state.pageOffsets[state.currentPage] = {
-                x: offset.x + step,
-                y: offset.y,
-            };
-            changed = true;
-        } else if (e.key === "ArrowUp") {
-            e.preventDefault();
-            state.pageOffsets[state.currentPage] = {
-                x: offset.x,
-                y: offset.y - step,
-            };
-            changed = true;
-        } else if (e.key === "ArrowDown") {
-            e.preventDefault();
-            state.pageOffsets[state.currentPage] = {
-                x: offset.x,
-                y: offset.y + step,
-            };
-            changed = true;
-        }
+        if (e.key === "ArrowLeft") { e.preventDefault(); newOffset.x -= step; changed = true; }
+        else if (e.key === "ArrowRight") { e.preventDefault(); newOffset.x += step; changed = true; }
+        else if (e.key === "ArrowUp") { e.preventDefault(); newOffset.y -= step; changed = true; }
+        else if (e.key === "ArrowDown") { e.preventDefault(); newOffset.y += step; changed = true; }
 
         if (changed) {
+            state.pageOffsets[state.currentPage] = newOffset;
+            if (state.applyOffsetToAll) {
+                for (let p = 1; p <= state.totalPages; p++) {
+                    state.pageOffsets[p] = { ...newOffset };
+                }
+            }
             updateAdjustDisplay();
             runComparison();
             return;
         }
     }
 
-    // 通常のキーボード操作
+    // Normal shortcuts
     if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
         e.preventDefault();
         btnPrev.click();
@@ -806,5 +1222,16 @@ document.addEventListener("keydown", (e) => {
         e.preventDefault();
         setZoom(1);
         canvasViewport.scrollTo(0, 0);
+    } else if (e.key === "[") {
+        e.preventDefault();
+        navigateToChangeRegion(state.currentChangeIndex - 1);
+    } else if (e.key === "]") {
+        e.preventDefault();
+        navigateToChangeRegion(state.currentChangeIndex + 1);
+    } else if (e.key === "s" || e.key === "S") {
+        if (!e.ctrlKey && !e.metaKey) {
+            e.preventDefault();
+            toggleSidebar();
+        }
     }
 });

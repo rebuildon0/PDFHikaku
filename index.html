@@ -62,144 +62,172 @@
 
         <!-- 結果表示エリア -->
         <section id="result-section" hidden>
-            <!-- ツールバー1: ナビゲーション -->
-            <div class="toolbar">
-                <div class="toolbar-left">
-                    <button id="btn-back" class="btn-secondary" title="ファイル選択画面に戻る">← 戻る</button>
-                </div>
-                <div class="toolbar-center">
-                    <div class="page-nav">
-                        <button id="btn-prev" class="btn-icon" disabled title="前のページ (←キー)">◀</button>
-                        <span id="page-info">1 / 1</span>
-                        <button id="btn-next" class="btn-icon" disabled title="次のページ (→キー)">▶</button>
+            <div class="result-layout">
+                <!-- サムネイルサイドバー -->
+                <aside id="thumbnail-sidebar" class="thumbnail-sidebar">
+                    <div class="sidebar-header">
+                        <span class="sidebar-title">ページ一覧</span>
+                        <button id="btn-toggle-sidebar" class="btn-icon btn-xs" title="サイドバーを閉じる">◀</button>
                     </div>
-                </div>
-                <div class="toolbar-right">
-                    <div class="zoom-controls">
-                        <button id="btn-zoom-out" class="btn-icon" title="縮小 (−キー)">−</button>
-                        <span id="zoom-level">100%</span>
-                        <button id="btn-zoom-in" class="btn-icon" title="拡大 (+キー)">+</button>
-                        <button id="btn-zoom-fit" class="btn-icon btn-zoom-fit" title="サイズをリセット (0キー)">⊡</button>
-                    </div>
-                    <button id="btn-adjust" class="btn-adjust" title="新図面の位置をずらして比較精度を上げる">位置調整</button>
-                    <button id="btn-export-pdf" class="btn-export" title="現在の表示モードでPDFファイルを保存">PDF出力</button>
-                    <button id="btn-help" class="btn-icon btn-help" title="使い方を表示">?</button>
-                </div>
-            </div>
+                    <div id="change-summary" class="change-summary"></div>
+                    <div id="thumbnail-list" class="thumbnail-list"></div>
+                </aside>
 
-            <!-- ツールバー2: 表示モード -->
-            <div class="toolbar toolbar-modes">
-                <div class="view-modes">
-                    <button class="btn-mode active" data-mode="overlay" title="新旧を重ねて変更箇所を色表示">重ね合わせ</button>
-                    <button class="btn-mode" data-mode="sidebyside" title="旧と新を横に並べて比較">並べて表示</button>
-                    <button class="btn-mode" data-mode="diff" title="変更があった箇所だけを表示">差分のみ</button>
-                    <button class="btn-mode" data-mode="old_colored" title="旧図面に変更箇所を色付き表示">旧図面</button>
-                    <button class="btn-mode" data-mode="new_colored" title="新図面に変更箇所を色付き表示">新図面</button>
-                </div>
-                <div class="legend">
-                    <span class="legend-item"><span class="legend-color legend-deleted"></span>削除</span>
-                    <span class="legend-item"><span class="legend-color legend-added"></span>追加</span>
-                </div>
-            </div>
-
-            <!-- 位置調整パネル -->
-            <div id="adjust-panel" class="adjust-panel" hidden>
-                <span class="adjust-icon">↕↔</span>
-                <span class="adjust-info">新図面の位置: <strong id="adjust-offset">X: 0　Y: 0</strong></span>
-                <button id="btn-adjust-reset" class="btn-secondary btn-sm">リセット</button>
-                <span class="adjust-hint">ドラッグで移動 / 矢印キーで1px移動 / Shift+矢印で10px移動</span>
-            </div>
-
-            <!-- キャンバスエリア -->
-            <div id="canvas-area">
-                <div id="canvas-viewport">
-                    <div id="canvas-transform">
-                        <div id="view-overlay" class="view-container">
-                            <canvas id="canvas-result"></canvas>
+                <!-- メインコンテンツ -->
+                <div class="result-main">
+                    <!-- ツールバー1: ナビゲーション＋コントロール -->
+                    <div class="toolbar toolbar-compact">
+                        <div class="toolbar-group">
+                            <button id="btn-back" class="btn-secondary btn-xs" title="ファイル選択に戻る">← 戻る</button>
+                            <button id="btn-open-sidebar" class="btn-icon btn-xs" title="サイドバーを開く" hidden>▶</button>
                         </div>
-                        <div id="view-sidebyside" class="view-container" hidden>
-                            <div class="side-panel">
-                                <h3>変更前 (旧)</h3>
-                                <canvas id="canvas-old"></canvas>
-                            </div>
-                            <div class="side-panel">
-                                <h3>変更後 (新)</h3>
-                                <canvas id="canvas-new"></canvas>
+                        <div class="toolbar-group file-info" id="file-info">
+                            <span class="fi-old">旧: <span id="info-old-name"></span></span>
+                            <span class="fi-sep">⇔</span>
+                            <span class="fi-new">新: <span id="info-new-name"></span></span>
+                        </div>
+                        <div class="toolbar-group">
+                            <div class="page-nav">
+                                <button id="btn-prev" class="btn-icon btn-xs" disabled title="前のページ (←)">◀</button>
+                                <span id="page-info">1 / 1</span>
+                                <button id="btn-next" class="btn-icon btn-xs" disabled title="次のページ (→)">▶</button>
                             </div>
                         </div>
+                        <div class="toolbar-group">
+                            <div class="change-nav" id="change-nav">
+                                <button id="btn-prev-change" class="btn-icon btn-xs" disabled title="前の変更箇所 ([)">◀</button>
+                                <span id="change-info" class="change-info">変更 0/0</span>
+                                <button id="btn-next-change" class="btn-icon btn-xs" disabled title="次の変更箇所 (])">▶</button>
+                            </div>
+                        </div>
+                        <div class="toolbar-group">
+                            <span id="diff-badge" class="diff-badge"></span>
+                        </div>
+                        <div class="toolbar-group toolbar-end">
+                            <div class="zoom-controls">
+                                <button id="btn-zoom-out" class="btn-icon btn-xs" title="縮小 (−)">−</button>
+                                <span id="zoom-level">100%</span>
+                                <button id="btn-zoom-in" class="btn-icon btn-xs" title="拡大 (+)">+</button>
+                                <button id="btn-zoom-fit" class="btn-icon btn-xs" title="リセット (0)">⊡</button>
+                            </div>
+                            <button id="btn-adjust" class="btn-tool" title="位置調整">位置調整</button>
+                            <button id="btn-export-pdf" class="btn-tool btn-accent" title="PDF出力">PDF出力</button>
+                            <button id="btn-help" class="btn-icon btn-xs" title="使い方">?</button>
+                        </div>
+                    </div>
+
+                    <!-- ツールバー2: 表示モード＋表示オプション -->
+                    <div class="toolbar toolbar-compact toolbar-modes-row">
+                        <div class="view-modes">
+                            <button class="btn-mode active" data-mode="overlay">重ね合わせ</button>
+                            <button class="btn-mode" data-mode="sidebyside">並べて表示</button>
+                            <button class="btn-mode" data-mode="diff">差分のみ</button>
+                            <button class="btn-mode" data-mode="old_colored">旧図面</button>
+                            <button class="btn-mode" data-mode="new_colored">新図面</button>
+                        </div>
+                        <div class="display-options">
+                            <span class="legend-item"><span class="legend-color legend-deleted"></span>削除</span>
+                            <span class="legend-item"><span class="legend-color legend-added"></span>追加</span>
+                            <span class="opt-sep">|</span>
+                            <label class="opt-label" title="未変更部分の表示濃度">背景 <input type="range" id="fade-slider" min="0" max="100" value="70" class="fade-slider"></label>
+                            <label class="opt-label" title="変更箇所を太く表示"><input type="checkbox" id="chk-dilate" checked> 太く表示</label>
+                        </div>
+                    </div>
+
+                    <!-- 位置調整パネル -->
+                    <div id="adjust-panel" class="adjust-panel" hidden>
+                        <span class="adjust-icon">↕↔</span>
+                        <span class="adjust-info">位置: <strong id="adjust-offset">X: 0　Y: 0</strong></span>
+                        <button id="btn-adjust-reset" class="btn-secondary btn-xs">リセット</button>
+                        <button id="btn-auto-align" class="btn-secondary btn-xs">自動位置合わせ</button>
+                        <label class="opt-label"><input type="checkbox" id="chk-apply-all"> 全ページに適用</label>
+                        <span class="adjust-hint">ドラッグ / 矢印1px / Shift+矢印10px</span>
+                    </div>
+
+                    <!-- キャンバスエリア -->
+                    <div id="canvas-area">
+                        <div id="canvas-viewport">
+                            <div id="canvas-transform">
+                                <div id="view-overlay" class="view-container">
+                                    <canvas id="canvas-result"></canvas>
+                                </div>
+                                <div id="view-sidebyside" class="view-container" hidden>
+                                    <div class="side-panel">
+                                        <h3>変更前 (旧)</h3>
+                                        <canvas id="canvas-old"></canvas>
+                                    </div>
+                                    <div class="side-panel">
+                                        <h3>変更後 (新)</h3>
+                                        <canvas id="canvas-new"></canvas>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
-            </div>
-
-            <!-- 差分サマリー -->
-            <div id="diff-summary" class="diff-summary">
-                <span id="diff-percent"></span>
             </div>
         </section>
+    </main>
 
-        <!-- ローディング -->
-        <div id="loading" class="loading-overlay" hidden>
-            <div class="spinner"></div>
-            <p id="loading-text">比較中...</p>
-        </div>
+    <!-- ローディング -->
+    <div id="loading" class="loading-overlay" hidden>
+        <div class="spinner"></div>
+        <p id="loading-text">比較中...</p>
+    </div>
 
-        <!-- トースト通知 -->
-        <div id="toast" class="toast" hidden></div>
+    <!-- トースト通知 -->
+    <div id="toast" class="toast" hidden></div>
 
-        <!-- ヘルプモーダル -->
-        <div id="help-modal" class="modal-overlay" hidden>
-            <div class="modal">
-                <div class="modal-header">
-                    <h2>使い方ガイド</h2>
-                    <button id="btn-help-close" class="btn-icon modal-close" title="閉じる">×</button>
+    <!-- ヘルプモーダル -->
+    <div id="help-modal" class="modal-overlay" hidden>
+        <div class="modal">
+            <div class="modal-header">
+                <h2>使い方ガイド</h2>
+                <button id="btn-help-close" class="btn-icon modal-close" title="閉じる">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="help-section">
+                    <h3>基本の使い方</h3>
+                    <ol>
+                        <li>「変更前」と「変更後」のPDFファイルをそれぞれアップロード</li>
+                        <li>「比較を開始」ボタンをクリック</li>
+                        <li>変更箇所が色付きで表示されます</li>
+                    </ol>
                 </div>
-                <div class="modal-body">
-                    <div class="help-section">
-                        <h3>基本の使い方</h3>
-                        <ol>
-                            <li>「変更前」と「変更後」のPDFファイルをそれぞれアップロード</li>
-                            <li>「比較を開始」ボタンをクリック</li>
-                            <li>変更箇所が色付きで表示されます</li>
-                        </ol>
-                    </div>
-                    <div class="help-section">
-                        <h3>表示モード</h3>
-                        <table class="help-table">
-                            <tr><td><strong>重ね合わせ</strong></td><td>新旧を重ねて変更箇所を色表示（標準）</td></tr>
-                            <tr><td><strong>並べて表示</strong></td><td>旧と新を横に並べて比較</td></tr>
-                            <tr><td><strong>差分のみ</strong></td><td>変更箇所だけを白背景に表示</td></tr>
-                            <tr><td><strong>旧図面</strong></td><td>旧図面に変更箇所を赤/青で強調</td></tr>
-                            <tr><td><strong>新図面</strong></td><td>新図面に変更箇所を赤/青で強調</td></tr>
-                        </table>
-                    </div>
-                    <div class="help-section">
-                        <h3>色の意味</h3>
-                        <p><span class="help-color help-red"></span> <strong>赤</strong> = 削除された部分（旧にあって新にない）</p>
-                        <p><span class="help-color help-blue"></span> <strong>青</strong> = 追加された部分（新にあって旧にない）</p>
-                    </div>
-                    <div class="help-section">
-                        <h3>位置調整</h3>
-                        <p>図面のずれがある場合、「位置調整」ボタンで新図面の位置を調整できます。</p>
-                        <p>ドラッグで大きく移動、矢印キーで1pxずつ微調整できます。</p>
-                    </div>
-                    <div class="help-section">
-                        <h3>キーボードショートカット</h3>
-                        <table class="help-table">
-                            <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>前/次のページ</td></tr>
-                            <tr><td><kbd>+</kbd> <kbd>−</kbd></td><td>拡大/縮小</td></tr>
-                            <tr><td><kbd>0</kbd></td><td>表示サイズをリセット</td></tr>
-                            <tr><td><kbd>↑↓←→</kbd></td><td>位置調整モード中: 1px移動</td></tr>
-                            <tr><td><kbd>Shift</kbd>+<kbd>↑↓←→</kbd></td><td>位置調整モード中: 10px移動</td></tr>
-                        </table>
-                    </div>
-                    <div class="help-section">
-                        <h3>プライバシー</h3>
-                        <p>すべての処理はブラウザ内で完結します。アップロードしたPDFがサーバーに送信されることはありません。</p>
-                    </div>
+                <div class="help-section">
+                    <h3>表示モード</h3>
+                    <table class="help-table">
+                        <tr><td><strong>重ね合わせ</strong></td><td>新旧を重ねて変更箇所を色表示（標準）</td></tr>
+                        <tr><td><strong>並べて表示</strong></td><td>旧と新を横に並べて比較</td></tr>
+                        <tr><td><strong>差分のみ</strong></td><td>変更箇所だけを白背景に表示</td></tr>
+                        <tr><td><strong>旧図面</strong></td><td>旧図面に変更箇所を赤/青で強調</td></tr>
+                        <tr><td><strong>新図面</strong></td><td>新図面に変更箇所を赤/青で強調</td></tr>
+                    </table>
+                </div>
+                <div class="help-section">
+                    <h3>色の意味</h3>
+                    <p><span class="help-color help-red"></span> <strong>赤</strong> = 削除された部分（旧にあって新にない）</p>
+                    <p><span class="help-color help-blue"></span> <strong>青</strong> = 追加された部分（新にあって旧にない）</p>
+                </div>
+                <div class="help-section">
+                    <h3>キーボードショートカット</h3>
+                    <table class="help-table">
+                        <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>前/次のページ</td></tr>
+                        <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>前/次の変更箇所へジャンプ</td></tr>
+                        <tr><td><kbd>+</kbd> <kbd>−</kbd></td><td>拡大/縮小</td></tr>
+                        <tr><td><kbd>0</kbd></td><td>表示サイズをリセット</td></tr>
+                        <tr><td><kbd>S</kbd></td><td>サイドバー表示/非表示</td></tr>
+                        <tr><td><kbd>↑↓←→</kbd></td><td>位置調整モード中: 1px移動</td></tr>
+                        <tr><td><kbd>Shift</kbd>+矢印</td><td>位置調整モード中: 10px移動</td></tr>
+                    </table>
+                </div>
+                <div class="help-section">
+                    <h3>プライバシー</h3>
+                    <p>すべての処理はブラウザ内で完結します。アップロードしたPDFがサーバーに送信されることはありません。</p>
                 </div>
             </div>
         </div>
-    </main>
+    </div>
 
     <script src="app.js"></script>
 </body>
