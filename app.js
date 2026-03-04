@@ -299,12 +299,12 @@ function comparePages(oldCanvas, newCanvas, offsetX = 0, offsetY = 0, opts = {})
             const newIsContent = (rNew + gNew + bNew) < 700;
 
             if (oldIsContent && !newIsContent) {
-                // 削除: 赤
+                // 削除: 緑
                 if (typeMap) typeMap[px] = 1;
-                resultData.data[i] = 239; resultData.data[i+1] = 68; resultData.data[i+2] = 68; resultData.data[i+3] = 200;
-                diffOnlyData.data[i] = 239; diffOnlyData.data[i+1] = 68; diffOnlyData.data[i+2] = 68; diffOnlyData.data[i+3] = 255;
-                oldColoredData.data[i] = 239; oldColoredData.data[i+1] = Math.round(gOld * 0.3); oldColoredData.data[i+2] = Math.round(bOld * 0.3); oldColoredData.data[i+3] = 255;
-                newColoredData.data[i] = 255; newColoredData.data[i+1] = 220; newColoredData.data[i+2] = 220; newColoredData.data[i+3] = 255;
+                resultData.data[i] = 22; resultData.data[i+1] = 163; resultData.data[i+2] = 74; resultData.data[i+3] = 200;
+                diffOnlyData.data[i] = 22; diffOnlyData.data[i+1] = 163; diffOnlyData.data[i+2] = 74; diffOnlyData.data[i+3] = 255;
+                oldColoredData.data[i] = 22; oldColoredData.data[i+1] = Math.round(gOld * 0.3 + 163 * 0.7); oldColoredData.data[i+2] = Math.round(bOld * 0.3); oldColoredData.data[i+3] = 255;
+                newColoredData.data[i] = 220; newColoredData.data[i+1] = 255; newColoredData.data[i+2] = 220; newColoredData.data[i+3] = 255;
             } else if (!oldIsContent && newIsContent) {
                 // 追加: 青
                 if (typeMap) typeMap[px] = 2;
@@ -317,7 +317,7 @@ function comparePages(oldCanvas, newCanvas, offsetX = 0, offsetY = 0, opts = {})
                 if (typeMap) typeMap[px] = 3;
                 resultData.data[i] = 180; resultData.data[i+1] = 80; resultData.data[i+2] = 200; resultData.data[i+3] = 200;
                 diffOnlyData.data[i] = 180; diffOnlyData.data[i+1] = 80; diffOnlyData.data[i+2] = 200; diffOnlyData.data[i+3] = 255;
-                oldColoredData.data[i] = 239; oldColoredData.data[i+1] = Math.round(gOld * 0.4); oldColoredData.data[i+2] = Math.round(bOld * 0.4); oldColoredData.data[i+3] = 255;
+                oldColoredData.data[i] = 22; oldColoredData.data[i+1] = Math.round(gOld * 0.4 + 163 * 0.6); oldColoredData.data[i+2] = Math.round(bOld * 0.4); oldColoredData.data[i+3] = 255;
                 newColoredData.data[i] = Math.round(rNew * 0.4); newColoredData.data[i+1] = Math.round(gNew * 0.4); newColoredData.data[i+2] = 246; newColoredData.data[i+3] = 255;
             }
         } else {
@@ -353,7 +353,7 @@ function comparePages(oldCanvas, newCanvas, offsetX = 0, offsetY = 0, opts = {})
                 if (neighborType) {
                     const i = idx * 4;
                     let r, g, b;
-                    if (neighborType === 1) { r = 239; g = 68; b = 68; }
+                    if (neighborType === 1) { r = 22; g = 163; b = 74; }
                     else if (neighborType === 2) { r = 59; g = 130; b = 246; }
                     else { r = 180; g = 80; b = 200; }
                     // Apply at reduced opacity for border effect
@@ -620,22 +620,22 @@ function applyMode() {
         viewOverlay.hidden = false;
         viewSideBySide.hidden = true;
         ctx.putImageData(state.overlayData, 0, 0);
-        drawChangeRegionOverlays();
+        // change region overlays removed
     } else if (state.mode === "diff") {
         viewOverlay.hidden = false;
         viewSideBySide.hidden = true;
         ctx.putImageData(state.diffOnlyData, 0, 0);
-        drawChangeRegionOverlays();
+        // change region overlays removed
     } else if (state.mode === "old_colored") {
         viewOverlay.hidden = false;
         viewSideBySide.hidden = true;
         ctx.putImageData(state.oldColoredData, 0, 0);
-        drawChangeRegionOverlays();
+        // change region overlays removed
     } else if (state.mode === "new_colored") {
         viewOverlay.hidden = false;
         viewSideBySide.hidden = true;
         ctx.putImageData(state.newColoredData, 0, 0);
-        drawChangeRegionOverlays();
+        // change region overlays removed
     } else {
         // sidebyside
         viewOverlay.hidden = true;
@@ -891,66 +891,74 @@ btnAutoAlign.addEventListener("click", () => {
 });
 
 function autoAlignPages(oldCanvas, newCanvas) {
-    const targetWidth = 400;
+    // 二値化コンテンツマッチング: 構造図面向けに最適化
+    // 白背景に黒い線の図面では、線の一致度で位置を合わせる
+    const targetWidth = 500;
     const scaleDown = targetWidth / Math.max(oldCanvas.width, 1);
     const tw = Math.round(oldCanvas.width * scaleDown);
     const th = Math.round(oldCanvas.height * scaleDown);
 
-    function downsampleGray(canvas) {
+    function downsampleBinary(canvas) {
         const c = document.createElement("canvas");
         c.width = tw; c.height = th;
         const ctx = c.getContext("2d");
         ctx.drawImage(canvas, 0, 0, tw, th);
         const data = ctx.getImageData(0, 0, tw, th).data;
-        const gray = new Float32Array(tw * th);
+        const binary = new Uint8Array(tw * th);
         for (let i = 0; i < tw * th; i++) {
-            gray[i] = data[i*4] * 0.299 + data[i*4+1] * 0.587 + data[i*4+2] * 0.114;
+            const gray = data[i*4] * 0.299 + data[i*4+1] * 0.587 + data[i*4+2] * 0.114;
+            binary[i] = gray < 200 ? 1 : 0; // コンテンツ(線)=1, 背景=0
         }
-        return gray;
+        return binary;
     }
 
-    const gOld = downsampleGray(oldCanvas);
-    const gNew = downsampleGray(newCanvas);
+    const bOld = downsampleBinary(oldCanvas);
+    const bNew = downsampleBinary(newCanvas);
 
-    const searchRange = 25;
-    let bestSAD = Infinity, bestOx = 0, bestOy = 0;
+    // コンテンツが少なすぎる場合は位置合わせ不要
+    let contentCount = 0;
+    for (let i = 0; i < bOld.length; i++) contentCount += bOld[i];
+    if (contentCount < 50) return { x: 0, y: 0 };
 
-    // Coarse search (step 2)
-    for (let oy = -searchRange; oy <= searchRange; oy += 2) {
-        for (let ox = -searchRange; ox <= searchRange; ox += 2) {
-            let sad = 0, count = 0;
-            const yStart = Math.max(0, -oy), yEnd = Math.min(th, th - oy);
-            const xStart = Math.max(0, -ox), xEnd = Math.min(tw, tw - ox);
-            for (let y = yStart; y < yEnd; y++) {
-                for (let x = xStart; x < xEnd; x++) {
-                    sad += Math.abs(gOld[y * tw + x] - gNew[(y + oy) * tw + (x + ox)]);
-                    count++;
+    const searchRange = 30;
+    let bestScore = -1, bestOx = 0, bestOy = 0;
+
+    // コンテンツピクセルの一致率を最大化
+    function calcMatchScore(ox, oy) {
+        let matches = 0, total = 0;
+        const yStart = Math.max(0, -oy), yEnd = Math.min(th, th - oy);
+        const xStart = Math.max(0, -ox), xEnd = Math.min(tw, tw - ox);
+        for (let y = yStart; y < yEnd; y++) {
+            for (let x = xStart; x < xEnd; x++) {
+                const oi = y * tw + x;
+                const ni = (y + oy) * tw + (x + ox);
+                if (bOld[oi] || bNew[ni]) {
+                    total++;
+                    if (bOld[oi] === bNew[ni]) matches++;
                 }
             }
-            if (count > 0) sad /= count;
-            if (sad < bestSAD) { bestSAD = sad; bestOx = ox; bestOy = oy; }
+        }
+        return total > 0 ? matches / total : 0;
+    }
+
+    // 粗い探索 (2px刻み)
+    for (let oy = -searchRange; oy <= searchRange; oy += 2) {
+        for (let ox = -searchRange; ox <= searchRange; ox += 2) {
+            const score = calcMatchScore(ox, oy);
+            if (score > bestScore) { bestScore = score; bestOx = ox; bestOy = oy; }
         }
     }
 
-    // Fine search (step 1)
+    // 精密探索 (1px刻み)
     const coarseOx = bestOx, coarseOy = bestOy;
     for (let oy = coarseOy - 3; oy <= coarseOy + 3; oy++) {
         for (let ox = coarseOx - 3; ox <= coarseOx + 3; ox++) {
-            let sad = 0, count = 0;
-            const yStart = Math.max(0, -oy), yEnd = Math.min(th, th - oy);
-            const xStart = Math.max(0, -ox), xEnd = Math.min(tw, tw - ox);
-            for (let y = yStart; y < yEnd; y++) {
-                for (let x = xStart; x < xEnd; x++) {
-                    sad += Math.abs(gOld[y * tw + x] - gNew[(y + oy) * tw + (x + ox)]);
-                    count++;
-                }
-            }
-            if (count > 0) sad /= count;
-            if (sad < bestSAD) { bestSAD = sad; bestOx = ox; bestOy = oy; }
+            const score = calcMatchScore(ox, oy);
+            if (score > bestScore) { bestScore = score; bestOx = ox; bestOy = oy; }
         }
     }
 
-    // Convert back to original scale (CSS pixels, not canvas pixels)
+    // ダウンサンプル座標 → CSS pixel座標に変換
     return {
         x: Math.round(bestOx / scaleDown / state.scale),
         y: Math.round(bestOy / scaleDown / state.scale),
