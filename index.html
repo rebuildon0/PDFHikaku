@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF比較ツール</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+</head>
+<body>
+    <header>
+        <h1>PDF比較ツール</h1>
+        <p class="subtitle">2つのPDFをアップロードして、変更箇所を自動検出します</p>
+    </header>
+
+    <main>
+        <!-- アップロードエリア -->
+        <section id="upload-section">
+            <div class="steps-guide">
+                <div class="step"><span class="step-num">1</span>変更前のPDFを選択</div>
+                <div class="step-arrow">→</div>
+                <div class="step"><span class="step-num">2</span>変更後のPDFを選択</div>
+                <div class="step-arrow">→</div>
+                <div class="step"><span class="step-num">3</span>比較する</div>
+            </div>
+            <div class="upload-container">
+                <div class="upload-box" id="upload-old">
+                    <input type="file" id="file-old" accept=".pdf" hidden>
+                    <div class="upload-content" id="upload-content-old">
+                        <div class="upload-icon">📄</div>
+                        <p class="upload-label">変更前 (旧)</p>
+                        <p class="upload-hint">クリックまたはドラッグ&ドロップ</p>
+                        <p class="upload-format">対応形式: PDF</p>
+                    </div>
+                    <div class="upload-done" id="upload-done-old" hidden>
+                        <div class="upload-icon">✅</div>
+                        <p class="file-name" id="file-name-old"></p>
+                        <p class="file-size" id="file-size-old"></p>
+                        <button class="btn-remove" id="btn-remove-old">ファイルを変更</button>
+                    </div>
+                </div>
+                <div class="upload-box" id="upload-new">
+                    <input type="file" id="file-new" accept=".pdf" hidden>
+                    <div class="upload-content" id="upload-content-new">
+                        <div class="upload-icon">📄</div>
+                        <p class="upload-label">変更後 (新)</p>
+                        <p class="upload-hint">クリックまたはドラッグ&ドロップ</p>
+                        <p class="upload-format">対応形式: PDF</p>
+                    </div>
+                    <div class="upload-done" id="upload-done-new" hidden>
+                        <div class="upload-icon">✅</div>
+                        <p class="file-name" id="file-name-new"></p>
+                        <p class="file-size" id="file-size-new"></p>
+                        <button class="btn-remove" id="btn-remove-new">ファイルを変更</button>
+                    </div>
+                </div>
+            </div>
+            <button id="btn-compare" class="btn-primary" disabled>比較を開始</button>
+            <p class="privacy-note">ファイルはブラウザ内で処理されます。サーバーへの送信は一切ありません。</p>
+        </section>
+
+        <!-- 結果表示エリア -->
+        <section id="result-section" hidden>
+            <!-- ツールバー1: ナビゲーション -->
+            <div class="toolbar">
+                <div class="toolbar-left">
+                    <button id="btn-back" class="btn-secondary" title="ファイル選択画面に戻る">← 戻る</button>
+                </div>
+                <div class="toolbar-center">
+                    <div class="page-nav">
+                        <button id="btn-prev" class="btn-icon" disabled title="前のページ (←キー)">◀</button>
+                        <span id="page-info">1 / 1</span>
+                        <button id="btn-next" class="btn-icon" disabled title="次のページ (→キー)">▶</button>
+                    </div>
+                </div>
+                <div class="toolbar-right">
+                    <div class="zoom-controls">
+                        <button id="btn-zoom-out" class="btn-icon" title="縮小 (−キー)">−</button>
+                        <span id="zoom-level">100%</span>
+                        <button id="btn-zoom-in" class="btn-icon" title="拡大 (+キー)">+</button>
+                        <button id="btn-zoom-fit" class="btn-icon btn-zoom-fit" title="サイズをリセット (0キー)">⊡</button>
+                    </div>
+                    <button id="btn-adjust" class="btn-adjust" title="新図面の位置をずらして比較精度を上げる">位置調整</button>
+                    <button id="btn-export-pdf" class="btn-export" title="現在の表示モードでPDFファイルを保存">PDF出力</button>
+                    <button id="btn-help" class="btn-icon btn-help" title="使い方を表示">?</button>
+                </div>
+            </div>
+
+            <!-- ツールバー2: 表示モード -->
+            <div class="toolbar toolbar-modes">
+                <div class="view-modes">
+                    <button class="btn-mode active" data-mode="overlay" title="新旧を重ねて変更箇所を色表示">重ね合わせ</button>
+                    <button class="btn-mode" data-mode="sidebyside" title="旧と新を横に並べて比較">並べて表示</button>
+                    <button class="btn-mode" data-mode="diff" title="変更があった箇所だけを表示">差分のみ</button>
+                    <button class="btn-mode" data-mode="old_colored" title="旧図面に変更箇所を色付き表示">旧図面</button>
+                    <button class="btn-mode" data-mode="new_colored" title="新図面に変更箇所を色付き表示">新図面</button>
+                </div>
+                <div class="legend">
+                    <span class="legend-item"><span class="legend-color legend-deleted"></span>削除</span>
+                    <span class="legend-item"><span class="legend-color legend-added"></span>追加</span>
+                </div>
+            </div>
+
+            <!-- 位置調整パネル -->
+            <div id="adjust-panel" class="adjust-panel" hidden>
+                <span class="adjust-icon">↕↔</span>
+                <span class="adjust-info">新図面の位置: <strong id="adjust-offset">X: 0　Y: 0</strong></span>
+                <button id="btn-adjust-reset" class="btn-secondary btn-sm">リセット</button>
+                <span class="adjust-hint">ドラッグで移動 / 矢印キーで1px移動 / Shift+矢印で10px移動</span>
+            </div>
+
+            <!-- キャンバスエリア -->
+            <div id="canvas-area">
+                <div id="canvas-viewport">
+                    <div id="canvas-transform">
+                        <div id="view-overlay" class="view-container">
+                            <canvas id="canvas-result"></canvas>
+                        </div>
+                        <div id="view-sidebyside" class="view-container" hidden>
+                            <div class="side-panel">
+                                <h3>変更前 (旧)</h3>
+                                <canvas id="canvas-old"></canvas>
+                            </div>
+                            <div class="side-panel">
+                                <h3>変更後 (新)</h3>
+                                <canvas id="canvas-new"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 差分サマリー -->
+            <div id="diff-summary" class="diff-summary">
+                <span id="diff-percent"></span>
+            </div>
+        </section>
+
+        <!-- ローディング -->
+        <div id="loading" class="loading-overlay" hidden>
+            <div class="spinner"></div>
+            <p id="loading-text">比較中...</p>
+        </div>
+
+        <!-- トースト通知 -->
+        <div id="toast" class="toast" hidden></div>
+
+        <!-- ヘルプモーダル -->
+        <div id="help-modal" class="modal-overlay" hidden>
+            <div class="modal">
+                <div class="modal-header">
+                    <h2>使い方ガイド</h2>
+                    <button id="btn-help-close" class="btn-icon modal-close" title="閉じる">×</button>
+                </div>
+                <div class="modal-body">
+                    <div class="help-section">
+                        <h3>基本の使い方</h3>
+                        <ol>
+                            <li>「変更前」と「変更後」のPDFファイルをそれぞれアップロード</li>
+                            <li>「比較を開始」ボタンをクリック</li>
+                            <li>変更箇所が色付きで表示されます</li>
+                        </ol>
+                    </div>
+                    <div class="help-section">
+                        <h3>表示モード</h3>
+                        <table class="help-table">
+                            <tr><td><strong>重ね合わせ</strong></td><td>新旧を重ねて変更箇所を色表示（標準）</td></tr>
+                            <tr><td><strong>並べて表示</strong></td><td>旧と新を横に並べて比較</td></tr>
+                            <tr><td><strong>差分のみ</strong></td><td>変更箇所だけを白背景に表示</td></tr>
+                            <tr><td><strong>旧図面</strong></td><td>旧図面に変更箇所を赤/青で強調</td></tr>
+                            <tr><td><strong>新図面</strong></td><td>新図面に変更箇所を赤/青で強調</td></tr>
+                        </table>
+                    </div>
+                    <div class="help-section">
+                        <h3>色の意味</h3>
+                        <p><span class="help-color help-red"></span> <strong>赤</strong> = 削除された部分（旧にあって新にない）</p>
+                        <p><span class="help-color help-blue"></span> <strong>青</strong> = 追加された部分（新にあって旧にない）</p>
+                    </div>
+                    <div class="help-section">
+                        <h3>位置調整</h3>
+                        <p>図面のずれがある場合、「位置調整」ボタンで新図面の位置を調整できます。</p>
+                        <p>ドラッグで大きく移動、矢印キーで1pxずつ微調整できます。</p>
+                    </div>
+                    <div class="help-section">
+                        <h3>キーボードショートカット</h3>
+                        <table class="help-table">
+                            <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>前/次のページ</td></tr>
+                            <tr><td><kbd>+</kbd> <kbd>−</kbd></td><td>拡大/縮小</td></tr>
+                            <tr><td><kbd>0</kbd></td><td>表示サイズをリセット</td></tr>
+                            <tr><td><kbd>↑↓←→</kbd></td><td>位置調整モード中: 1px移動</td></tr>
+                            <tr><td><kbd>Shift</kbd>+<kbd>↑↓←→</kbd></td><td>位置調整モード中: 10px移動</td></tr>
+                        </table>
+                    </div>
+                    <div class="help-section">
+                        <h3>プライバシー</h3>
+                        <p>すべての処理はブラウザ内で完結します。アップロードしたPDFがサーバーに送信されることはありません。</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>
