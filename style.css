@@ -13,7 +13,7 @@
     --primary-hover: #1d4ed8;
     --danger: #ef4444;
     --success: #22c55e;
-    --deleted-color: #16a34a;
+    --deleted-color: #ef4444;
     --added-color: #3b82f6;
     --bg: #f8fafc;
     --surface: #ffffff;
@@ -507,7 +507,7 @@ button.btn-secondary.btn-xs { width: auto; height: 28px; padding: 0 8px; font-si
     border-radius: 3px;
 }
 
-.legend-deleted { background: rgba(22, 163, 74, 0.6); }
+.legend-deleted { background: rgba(239, 68, 68, 0.6); }
 .legend-added { background: rgba(59, 130, 246, 0.6); }
 
 .opt-sep { color: var(--border); }
@@ -725,7 +725,7 @@ kbd {
     margin-right: 4px;
 }
 
-.help-red { background: rgba(22, 163, 74, 0.6); }
+.help-red { background: rgba(239, 68, 68, 0.6); }
 .help-blue { background: rgba(59, 130, 246, 0.6); }
 
 /* ===== Responsive ===== */

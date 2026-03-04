@@ -299,12 +299,12 @@ function comparePages(oldCanvas, newCanvas, offsetX = 0, offsetY = 0, opts = {})
             const newIsContent = (rNew + gNew + bNew) < 700;
 
             if (oldIsContent && !newIsContent) {
-                // 削除: 緑
+                // 削除: 赤
                 if (typeMap) typeMap[px] = 1;
-                resultData.data[i] = 22; resultData.data[i+1] = 163; resultData.data[i+2] = 74; resultData.data[i+3] = 200;
-                diffOnlyData.data[i] = 22; diffOnlyData.data[i+1] = 163; diffOnlyData.data[i+2] = 74; diffOnlyData.data[i+3] = 255;
-                oldColoredData.data[i] = 22; oldColoredData.data[i+1] = Math.round(gOld * 0.3 + 163 * 0.7); oldColoredData.data[i+2] = Math.round(bOld * 0.3); oldColoredData.data[i+3] = 255;
-                newColoredData.data[i] = 220; newColoredData.data[i+1] = 255; newColoredData.data[i+2] = 220; newColoredData.data[i+3] = 255;
+                resultData.data[i] = 239; resultData.data[i+1] = 68; resultData.data[i+2] = 68; resultData.data[i+3] = 200;
+                diffOnlyData.data[i] = 239; diffOnlyData.data[i+1] = 68; diffOnlyData.data[i+2] = 68; diffOnlyData.data[i+3] = 255;
+                oldColoredData.data[i] = 239; oldColoredData.data[i+1] = Math.round(gOld * 0.3 + 68 * 0.7); oldColoredData.data[i+2] = Math.round(bOld * 0.3 + 68 * 0.7); oldColoredData.data[i+3] = 255;
+                newColoredData.data[i] = 255; newColoredData.data[i+1] = 220; newColoredData.data[i+2] = 220; newColoredData.data[i+3] = 255;
             } else if (!oldIsContent && newIsContent) {
                 // 追加: 青
                 if (typeMap) typeMap[px] = 2;
@@ -317,7 +317,7 @@ function comparePages(oldCanvas, newCanvas, offsetX = 0, offsetY = 0, opts = {})
                 if (typeMap) typeMap[px] = 3;
                 resultData.data[i] = 180; resultData.data[i+1] = 80; resultData.data[i+2] = 200; resultData.data[i+3] = 200;
                 diffOnlyData.data[i] = 180; diffOnlyData.data[i+1] = 80; diffOnlyData.data[i+2] = 200; diffOnlyData.data[i+3] = 255;
-                oldColoredData.data[i] = 22; oldColoredData.data[i+1] = Math.round(gOld * 0.4 + 163 * 0.6); oldColoredData.data[i+2] = Math.round(bOld * 0.4); oldColoredData.data[i+3] = 255;
+                oldColoredData.data[i] = 239; oldColoredData.data[i+1] = Math.round(gOld * 0.4 + 68 * 0.6); oldColoredData.data[i+2] = Math.round(bOld * 0.4 + 68 * 0.6); oldColoredData.data[i+3] = 255;
                 newColoredData.data[i] = Math.round(rNew * 0.4); newColoredData.data[i+1] = Math.round(gNew * 0.4); newColoredData.data[i+2] = 246; newColoredData.data[i+3] = 255;
             }
         } else {
@@ -353,7 +353,7 @@ function comparePages(oldCanvas, newCanvas, offsetX = 0, offsetY = 0, opts = {})
                 if (neighborType) {
                     const i = idx * 4;
                     let r, g, b;
-                    if (neighborType === 1) { r = 22; g = 163; b = 74; }
+                    if (neighborType === 1) { r = 239; g = 68; b = 68; }
                     else if (neighborType === 2) { r = 59; g = 130; b = 246; }
                     else { r = 180; g = 80; b = 200; }
                     // Apply at reduced opacity for border effect
@@ -499,15 +499,32 @@ function navigateToChangeRegion(index) {
     state.currentChangeIndex = index;
     updateChangeNav();
 
-    // Redraw to update highlight
+    const r = state.changeRegions[index];
+    const viewW = canvasViewport.clientWidth;
+    const viewH = canvasViewport.clientHeight;
+    const padPx = 80; // viewport padding in pixels
+
+    // Calculate zoom to fit the change region comfortably in viewport
+    const regionCssW = r.w / state.scale; // region width in CSS pixels at zoom=1
+    const regionCssH = r.h / state.scale;
+
+    const zoomW = (viewW - padPx * 2) / regionCssW;
+    const zoomH = (viewH - padPx * 2) / regionCssH;
+    let targetZoom = Math.min(zoomW, zoomH);
+
+    // Clamp: reasonable range for viewing changes
+    targetZoom = Math.min(targetZoom, 4);  // don't zoom in too much
+    targetZoom = Math.max(targetZoom, 0.5); // don't zoom out too much
+    targetZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, targetZoom));
+
+    setZoom(targetZoom);
+
+    // Redraw to show green highlight frame
     applyMode();
 
     // Scroll viewport to center the region
-    const r = state.changeRegions[index];
     const zoomRatio = state.zoom / state.scale;
-    const viewW = canvasViewport.clientWidth;
-    const viewH = canvasViewport.clientHeight;
-    const cx = (r.x + r.w / 2) * zoomRatio + 8; // 8 = padding
+    const cx = (r.x + r.w / 2) * zoomRatio + 8;
     const cy = (r.y + r.h / 2) * zoomRatio + 8;
 
     canvasViewport.scrollTo({
@@ -620,28 +637,67 @@ function applyMode() {
         viewOverlay.hidden = false;
         viewSideBySide.hidden = true;
         ctx.putImageData(state.overlayData, 0, 0);
-        // change region overlays removed
     } else if (state.mode === "diff") {
         viewOverlay.hidden = false;
         viewSideBySide.hidden = true;
         ctx.putImageData(state.diffOnlyData, 0, 0);
-        // change region overlays removed
     } else if (state.mode === "old_colored") {
         viewOverlay.hidden = false;
         viewSideBySide.hidden = true;
         ctx.putImageData(state.oldColoredData, 0, 0);
-        // change region overlays removed
     } else if (state.mode === "new_colored") {
         viewOverlay.hidden = false;
         viewSideBySide.hidden = true;
         ctx.putImageData(state.newColoredData, 0, 0);
-        // change region overlays removed
     } else {
         // sidebyside
         viewOverlay.hidden = true;
         viewSideBySide.hidden = false;
     }
+
+    // Draw green highlight frame around current change region
+    if (state.mode !== "sidebyside" &&
+        state.currentChangeIndex >= 0 &&
+        state.currentChangeIndex < state.changeRegions.length) {
+        drawChangeHighlight(ctx);
+    }
+
     applyZoomToCanvases();
+}
+
+// --- Draw green highlight frame around selected change region ---
+function drawChangeHighlight(ctx) {
+    const r = state.changeRegions[state.currentChangeIndex];
+    const pad = 12;
+    ctx.save();
+
+    // Outer glow effect
+    ctx.strokeStyle = "rgba(34, 197, 94, 0.3)";
+    ctx.lineWidth = 10;
+    ctx.strokeRect(r.x - pad - 3, r.y - pad - 3, r.w + (pad + 3) * 2, r.h + (pad + 3) * 2);
+
+    // Main green frame
+    ctx.strokeStyle = "#22c55e";
+    ctx.lineWidth = 4;
+    ctx.strokeRect(r.x - pad, r.y - pad, r.w + pad * 2, r.h + pad * 2);
+
+    // Corner marks for extra visibility
+    const cornerLen = Math.min(20, r.w / 4, r.h / 4);
+    ctx.strokeStyle = "#16a34a";
+    ctx.lineWidth = 5;
+    const x1 = r.x - pad, y1 = r.y - pad;
+    const x2 = r.x + r.w + pad, y2 = r.y + r.h + pad;
+
+    // Top-left
+    ctx.beginPath(); ctx.moveTo(x1, y1 + cornerLen); ctx.lineTo(x1, y1); ctx.lineTo(x1 + cornerLen, y1); ctx.stroke();
+    // Top-right
+    ctx.beginPath(); ctx.moveTo(x2 - cornerLen, y1); ctx.lineTo(x2, y1); ctx.lineTo(x2, y1 + cornerLen); ctx.stroke();
+    // Bottom-left
+    ctx.beginPath(); ctx.moveTo(x1, y2 - cornerLen); ctx.lineTo(x1, y2); ctx.lineTo(x1 + cornerLen, y2); ctx.stroke();
+    // Bottom-right
+    ctx.beginPath(); ctx.moveTo(x2 - cornerLen, y2); ctx.lineTo(x2, y2); ctx.lineTo(x2, y2 - cornerLen); ctx.stroke();
+
+    ctx.restore();
 }
 
 // --- Navigation ---
