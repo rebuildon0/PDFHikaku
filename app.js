@@ -37,20 +37,33 @@ const state = {
     adjustStartY: 0,
     adjustStartOffsetX: 0,
     adjustStartOffsetY: 0,
-    applyOffsetToAll: false,
     // Change regions
     changeRegions: [],
     currentChangeIndex: -1,
     // Display options
     fadeAmount: 0.7,
     dilateChanges: true,
+    sensitivity: 30, // 変更検出閾値 (低い=厳しい, 高い=緩い)
+    blurRadius: 1.0,  // 前処理ぼかし半径 (0=なし, 0.1刻み)
+    noiseSize: 4,     // ノイズ除去: この面積以下の差分領域を無視
+    // Scale adjustment
+    pageScales: {}, // per-page scale factor for new canvas
     // Thumbnails
     pageChangeData: [],
     sidebarVisible: true,
+    // Page mapping: [{oldPage: number|null, newPage: number|null}, ...]
+    pageMapping: [],
+    // Thumbnail caches for mapping UI
+    mappingThumbsOld: [], // canvas elements
+    mappingThumbsNew: [],
 };
 
 function getPageOffset(page) {
     return state.pageOffsets[page] || { x: 0, y: 0 };
+}
+
+function getPageScale(page) {
+    return state.pageScales[page] || 1.0;
 }
 
 // --- DOM Elements ---
@@ -93,8 +106,8 @@ const btnAdjust = $("btn-adjust");
 const adjustPanel = $("adjust-panel");
 const adjustOffset = $("adjust-offset");
 const btnAdjustReset = $("btn-adjust-reset");
-const btnAutoAlign = $("btn-auto-align");
-const chkApplyAll = $("chk-apply-all");
+
+
 const diffBadge = $("diff-badge");
 const fadeSlider = $("fade-slider");
 const chkDilate = $("chk-dilate");
@@ -113,6 +126,45 @@ const helpModal = $("help-modal");
 const btnHelpClose = $("btn-help-close");
 
 const btnDemo = $("btn-demo");
+
+// Mapping section
+const mappingSection = $("mapping-section");
+const mappingList = $("mapping-list");
+const mappingLoading = $("mapping-loading");
+const btnAutoMatch = $("btn-auto-match");
+const btnAddPair = $("btn-add-pair");
+const btnResetMapping = $("btn-reset-mapping");
+const btnMappingBack = $("btn-mapping-back");
+const btnMappingConfirm = $("btn-mapping-confirm");
+const btnThumbSmaller = $("btn-thumb-smaller");
+const btnThumbLarger = $("btn-thumb-larger");
+const thumbSizeLabel = $("thumb-size-label");
+
+// Mapping thumbnail size presets: [width, height, label]
+const THUMB_SIZES = [
+    [60, 45, "S"],
+    [80, 60, "M"],
+    [130, 100, "L"],
+    [200, 150, "XL"],
+];
+let thumbSizeIndex = 1; // default M
+
+function applyThumbSize() {
+    const [w, h, label] = THUMB_SIZES[thumbSizeIndex];
+    mappingSection.style.setProperty("--mapping-thumb-w", w + "px");
+    mappingSection.style.setProperty("--mapping-thumb-h", h + "px");
+    thumbSizeLabel.textContent = label;
+    btnThumbSmaller.disabled = thumbSizeIndex <= 0;
+    btnThumbLarger.disabled = thumbSizeIndex >= THUMB_SIZES.length - 1;
+}
+
+btnThumbSmaller.addEventListener("click", () => {
+    if (thumbSizeIndex > 0) { thumbSizeIndex--; applyThumbSize(); }
+});
+
+btnThumbLarger.addEventListener("click", () => {
+    if (thumbSizeIndex < THUMB_SIZES.length - 1) { thumbSizeIndex++; applyThumbSize(); }
+});
 
 // --- Demo ---
 btnDemo.addEventListener("click", async () => {
@@ -144,25 +196,9 @@ btnDemo.addEventListener("click", async () => {
         state.oldPdf = await pdfjsLib.getDocument({ data: oldData }).promise;
         state.newPdf = await pdfjsLib.getDocument({ data: newData }).promise;
 
-        state.totalPages = Math.max(state.oldPdf.numPages, state.newPdf.numPages);
-        state.currentPage = 1;
-        state.pageChangeData = [];
-        state.pageOffsets = {};
-
-        // Show result section
+        // Show mapping screen
         uploadSection.hidden = true;
-        resultSection.hidden = false;
-        document.body.classList.add("comparing");
-
-        // File info
-        infoOldName.textContent = state.oldFile.name;
-        infoNewName.textContent = state.newFile.name;
-
-        loadingText.textContent = "比較中...";
-        await renderCurrentPage();
-
-        // Generate thumbnails in background
-        generateThumbnails();
+        showMappingScreen();
     } catch (err) {
         alert("デモの読み込みに失敗しました: " + err.message);
     } finally {
@@ -239,25 +275,9 @@ btnCompare.addEventListener("click", async () => {
         state.oldPdf = await pdfjsLib.getDocument({ data: oldData }).promise;
         state.newPdf = await pdfjsLib.getDocument({ data: newData }).promise;
 
-        state.totalPages = Math.max(state.oldPdf.numPages, state.newPdf.numPages);
-        state.currentPage = 1;
-        state.pageChangeData = [];
-        state.pageOffsets = {};
-
-        // Show result section
+        // Show mapping screen
         uploadSection.hidden = true;
-        resultSection.hidden = false;
-        document.body.classList.add("comparing");
-
-        // File info
-        infoOldName.textContent = state.oldFile.name;
-        infoNewName.textContent = state.newFile.name;
-
-        loadingText.textContent = "比較中...";
-        await renderCurrentPage();
-
-        // Generate thumbnails in background
-        generateThumbnails();
+        showMappingScreen();
     } catch (err) {
         alert("PDFの読み込みに失敗しました: " + err.message);
     } finally {
@@ -273,6 +293,341 @@ function readFile(file) {
         reader.readAsArrayBuffer(file);
     });
 }
+
+// --- Page Mapping ---
+async function showMappingScreen() {
+    mappingSection.hidden = false;
+    resultSection.hidden = true;
+    applyThumbSize();
+
+    const oldPages = state.oldPdf.numPages;
+    const newPages = state.newPdf.numPages;
+
+    // Generate thumbnails for mapping
+    mappingLoading.hidden = false;
+    state.mappingThumbsOld = [];
+    state.mappingThumbsNew = [];
+
+    const thumbScale = 0.25;
+    for (let p = 1; p <= oldPages; p++) {
+        const c = await renderPageToCanvas(state.oldPdf, p, thumbScale);
+        state.mappingThumbsOld.push(c);
+    }
+    for (let p = 1; p <= newPages; p++) {
+        const c = await renderPageToCanvas(state.newPdf, p, thumbScale);
+        state.mappingThumbsNew.push(c);
+    }
+    mappingLoading.hidden = true;
+
+    // Default mapping: 1:1
+    initDefaultMapping();
+    renderMappingList();
+}
+
+function initDefaultMapping() {
+    const oldPages = state.oldPdf.numPages;
+    const newPages = state.newPdf.numPages;
+    state.pageMapping = [];
+
+    const maxPages = Math.max(oldPages, newPages);
+    for (let i = 0; i < maxPages; i++) {
+        state.pageMapping.push({
+            oldPage: i < oldPages ? i + 1 : null,
+            newPage: i < newPages ? i + 1 : null,
+        });
+    }
+}
+
+function renderMappingList() {
+    mappingList.innerHTML = "";
+    const oldPages = state.oldPdf.numPages;
+    const newPages = state.newPdf.numPages;
+
+    state.pageMapping.forEach((pair, idx) => {
+        const row = document.createElement("div");
+        row.className = "mapping-row";
+        row.dataset.idx = idx;
+
+        // Row number
+        const numEl = document.createElement("span");
+        numEl.className = "mapping-row-num";
+        numEl.textContent = `#${idx + 1}`;
+        row.appendChild(numEl);
+
+        // Old side
+        const oldSide = document.createElement("div");
+        oldSide.className = "mapping-side";
+
+        const oldLabel = document.createElement("span");
+        oldLabel.className = "mapping-side-label old";
+        oldLabel.textContent = "旧";
+        oldSide.appendChild(oldLabel);
+
+        const oldThumb = document.createElement("div");
+        oldThumb.className = "mapping-thumb";
+        if (pair.oldPage && state.mappingThumbsOld[pair.oldPage - 1]) {
+            const c = state.mappingThumbsOld[pair.oldPage - 1];
+            const clone = document.createElement("canvas");
+            clone.width = c.width;
+            clone.height = c.height;
+            clone.getContext("2d").drawImage(c, 0, 0);
+            oldThumb.appendChild(clone);
+        } else {
+            const span = document.createElement("span");
+            span.className = "mapping-thumb-none";
+            span.textContent = "なし";
+            oldThumb.appendChild(span);
+        }
+        oldSide.appendChild(oldThumb);
+
+        const oldSelect = document.createElement("select");
+        oldSelect.className = "mapping-select";
+        const oldNoneOpt = document.createElement("option");
+        oldNoneOpt.value = "";
+        oldNoneOpt.textContent = "なし (新規ページ)";
+        oldSelect.appendChild(oldNoneOpt);
+        for (let p = 1; p <= oldPages; p++) {
+            const opt = document.createElement("option");
+            opt.value = p;
+            opt.textContent = `旧 P${p}`;
+            if (pair.oldPage === p) opt.selected = true;
+            oldSelect.appendChild(opt);
+        }
+        oldSelect.addEventListener("change", () => {
+            const val = oldSelect.value ? parseInt(oldSelect.value) : null;
+            state.pageMapping[idx].oldPage = val;
+            renderMappingList();
+        });
+        oldSide.appendChild(oldSelect);
+        row.appendChild(oldSide);
+
+        // Arrow
+        const arrow = document.createElement("span");
+        arrow.className = "mapping-arrow";
+        arrow.textContent = "⇔";
+        row.appendChild(arrow);
+
+        // New side
+        const newSide = document.createElement("div");
+        newSide.className = "mapping-side";
+
+        const newLabel = document.createElement("span");
+        newLabel.className = "mapping-side-label new";
+        newLabel.textContent = "新";
+        newSide.appendChild(newLabel);
+
+        const newThumb = document.createElement("div");
+        newThumb.className = "mapping-thumb";
+        if (pair.newPage && state.mappingThumbsNew[pair.newPage - 1]) {
+            const c = state.mappingThumbsNew[pair.newPage - 1];
+            const clone = document.createElement("canvas");
+            clone.width = c.width;
+            clone.height = c.height;
+            clone.getContext("2d").drawImage(c, 0, 0);
+            newThumb.appendChild(clone);
+        } else {
+            const span = document.createElement("span");
+            span.className = "mapping-thumb-none";
+            span.textContent = "なし";
+            newThumb.appendChild(span);
+        }
+        newSide.appendChild(newThumb);
+
+        const newSelect = document.createElement("select");
+        newSelect.className = "mapping-select";
+        const newNoneOpt = document.createElement("option");
+        newNoneOpt.value = "";
+        newNoneOpt.textContent = "なし (削除ページ)";
+        newSelect.appendChild(newNoneOpt);
+        for (let p = 1; p <= newPages; p++) {
+            const opt = document.createElement("option");
+            opt.value = p;
+            opt.textContent = `新 P${p}`;
+            if (pair.newPage === p) opt.selected = true;
+            newSelect.appendChild(opt);
+        }
+        newSelect.addEventListener("change", () => {
+            const val = newSelect.value ? parseInt(newSelect.value) : null;
+            state.pageMapping[idx].newPage = val;
+            renderMappingList();
+        });
+        newSide.appendChild(newSelect);
+        row.appendChild(newSide);
+
+        // Remove button
+        const removeBtn = document.createElement("button");
+        removeBtn.className = "btn-mapping-remove";
+        removeBtn.title = "このペアを削除";
+        removeBtn.textContent = "×";
+        removeBtn.addEventListener("click", () => {
+            state.pageMapping.splice(idx, 1);
+            renderMappingList();
+        });
+        row.appendChild(removeBtn);
+
+        mappingList.appendChild(row);
+    });
+}
+
+// Auto-match pages by visual similarity
+async function autoMatchPages() {
+    mappingLoading.hidden = false;
+    mappingLoading.querySelector("span").textContent = "類似度を計算中...";
+
+    await new Promise(r => setTimeout(r, 30));
+
+    const oldPages = state.oldPdf.numPages;
+    const newPages = state.newPdf.numPages;
+
+    // Compute similarity matrix
+    function getFingerprint(canvas) {
+        if (!canvas) return null;
+        const size = 32;
+        const c = document.createElement("canvas");
+        c.width = size;
+        c.height = size;
+        const ctx = c.getContext("2d");
+        ctx.drawImage(canvas, 0, 0, size, size);
+        const data = ctx.getImageData(0, 0, size, size).data;
+        const fp = new Float32Array(size * size);
+        for (let i = 0; i < size * size; i++) {
+            fp[i] = (data[i * 4] * 0.299 + data[i * 4 + 1] * 0.587 + data[i * 4 + 2] * 0.114) / 255;
+        }
+        return fp;
+    }
+
+    function similarity(fp1, fp2) {
+        if (!fp1 || !fp2) return 0;
+        let dot = 0, mag1 = 0, mag2 = 0;
+        for (let i = 0; i < fp1.length; i++) {
+            dot += fp1[i] * fp2[i];
+            mag1 += fp1[i] * fp1[i];
+            mag2 += fp2[i] * fp2[i];
+        }
+        if (mag1 === 0 || mag2 === 0) return 0;
+        return dot / (Math.sqrt(mag1) * Math.sqrt(mag2));
+    }
+
+    const oldFPs = state.mappingThumbsOld.map(getFingerprint);
+    const newFPs = state.mappingThumbsNew.map(getFingerprint);
+
+    // Build similarity matrix
+    const simMatrix = [];
+    for (let o = 0; o < oldPages; o++) {
+        simMatrix[o] = [];
+        for (let n = 0; n < newPages; n++) {
+            simMatrix[o][n] = similarity(oldFPs[o], newFPs[n]);
+        }
+    }
+
+    // Greedy matching: pick highest similarity pairs first
+    const usedOld = new Set();
+    const usedNew = new Set();
+    const pairs = [];
+
+    // Collect all possible pairs with similarity
+    const allPairs = [];
+    for (let o = 0; o < oldPages; o++) {
+        for (let n = 0; n < newPages; n++) {
+            allPairs.push({ oldPage: o + 1, newPage: n + 1, sim: simMatrix[o][n] });
+        }
+    }
+    allPairs.sort((a, b) => b.sim - a.sim);
+
+    // Greedy match with threshold
+    const THRESHOLD = 0.85;
+    for (const p of allPairs) {
+        if (usedOld.has(p.oldPage) || usedNew.has(p.newPage)) continue;
+        if (p.sim < THRESHOLD) continue;
+        pairs.push({ oldPage: p.oldPage, newPage: p.newPage });
+        usedOld.add(p.oldPage);
+        usedNew.add(p.newPage);
+    }
+
+    // Add unmatched old pages (deleted)
+    for (let o = 1; o <= oldPages; o++) {
+        if (!usedOld.has(o)) {
+            pairs.push({ oldPage: o, newPage: null });
+        }
+    }
+
+    // Add unmatched new pages (added)
+    for (let n = 1; n <= newPages; n++) {
+        if (!usedNew.has(n)) {
+            pairs.push({ oldPage: null, newPage: n });
+        }
+    }
+
+    // Sort by page order: matched pairs first (by old page), then unmatched
+    pairs.sort((a, b) => {
+        const aKey = a.oldPage || (a.newPage + 1000);
+        const bKey = b.oldPage || (b.newPage + 1000);
+        return aKey - bKey;
+    });
+
+    state.pageMapping = pairs;
+    mappingLoading.hidden = true;
+    renderMappingList();
+}
+
+// Mapping UI event handlers
+btnAutoMatch.addEventListener("click", autoMatchPages);
+
+btnAddPair.addEventListener("click", () => {
+    state.pageMapping.push({ oldPage: null, newPage: null });
+    renderMappingList();
+    // Scroll to bottom
+    mappingList.scrollTop = mappingList.scrollHeight;
+});
+
+btnResetMapping.addEventListener("click", () => {
+    initDefaultMapping();
+    renderMappingList();
+});
+
+btnMappingBack.addEventListener("click", () => {
+    mappingSection.hidden = true;
+    uploadSection.hidden = false;
+    state.oldPdf = null;
+    state.newPdf = null;
+});
+
+btnMappingConfirm.addEventListener("click", async () => {
+    // Filter out empty pairs
+    const validMapping = state.pageMapping.filter(p => p.oldPage || p.newPage);
+    if (validMapping.length === 0) {
+        alert("少なくとも1つのページペアを設定してください。");
+        return;
+    }
+    state.pageMapping = validMapping;
+
+    loading.hidden = false;
+    loadingText.textContent = "比較中...";
+
+    try {
+        state.totalPages = state.pageMapping.length;
+        state.currentPage = 1;
+        state.pageChangeData = [];
+        state.pageOffsets = {};
+        state.pageScales = {};
+
+        // Show result section
+        mappingSection.hidden = true;
+        resultSection.hidden = false;
+        document.body.classList.add("comparing");
+
+        // File info
+        infoOldName.textContent = state.oldFile ? state.oldFile.name : "旧PDF";
+        infoNewName.textContent = state.newFile ? state.newFile.name : "新PDF";
+
+        await renderCurrentPage();
+        generateThumbnails();
+    } catch (err) {
+        alert("比較に失敗しました: " + err.message);
+    } finally {
+        loading.hidden = true;
+    }
+});
 
 // --- Render PDF page to offscreen canvas ---
 async function renderPageToCanvas(pdf, pageNum, scale) {
@@ -294,10 +649,119 @@ async function renderPageToCanvas(pdf, pageNum, scale) {
     return canvas;
 }
 
+// --- Box blur for pre-processing (supports fractional radius) ---
+function boxBlurImageData(imageData, radius) {
+    if (radius <= 0) return imageData;
+
+    const intR = Math.floor(radius);
+    const frac = radius - intR; // fractional part for blending
+
+    // If radius < 1, blend original with radius=1 blur
+    const blurR = Math.max(intR, frac > 0 && intR === 0 ? 1 : intR);
+    if (blurR === 0) return imageData;
+
+    const w = imageData.width, h = imageData.height;
+    const src = imageData.data;
+    const dst = new Uint8ClampedArray(src.length);
+
+    // Horizontal pass
+    for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+            let r = 0, g = 0, b = 0, cnt = 0;
+            for (let dx = -blurR; dx <= blurR; dx++) {
+                const nx = x + dx;
+                if (nx >= 0 && nx < w) {
+                    const i = (y * w + nx) * 4;
+                    r += src[i]; g += src[i+1]; b += src[i+2];
+                    cnt++;
+                }
+            }
+            const i = (y * w + x) * 4;
+            dst[i] = r / cnt; dst[i+1] = g / cnt; dst[i+2] = b / cnt; dst[i+3] = 255;
+        }
+    }
+
+    // Vertical pass
+    const dst2 = new Uint8ClampedArray(src.length);
+    for (let x = 0; x < w; x++) {
+        for (let y = 0; y < h; y++) {
+            let r = 0, g = 0, b = 0, cnt = 0;
+            for (let dy = -blurR; dy <= blurR; dy++) {
+                const ny = y + dy;
+                if (ny >= 0 && ny < h) {
+                    const i = (ny * w + x) * 4;
+                    r += dst[i]; g += dst[i+1]; b += dst[i+2];
+                    cnt++;
+                }
+            }
+            const i = (y * w + x) * 4;
+            dst2[i] = r / cnt; dst2[i+1] = g / cnt; dst2[i+2] = b / cnt; dst2[i+3] = 255;
+        }
+    }
+
+    // Blend: if fractional, mix original with blurred by the fractional amount
+    const blendFactor = intR === 0 ? frac : (intR + frac) / (intR + 1);
+    if (blendFactor < 1.0) {
+        const inv = 1.0 - blendFactor;
+        for (let i = 0; i < src.length; i += 4) {
+            dst2[i]   = Math.round(src[i]   * inv + dst2[i]   * blendFactor);
+            dst2[i+1] = Math.round(src[i+1] * inv + dst2[i+1] * blendFactor);
+            dst2[i+2] = Math.round(src[i+2] * inv + dst2[i+2] * blendFactor);
+        }
+    }
+
+    return new ImageData(dst2, w, h);
+}
+
+// --- Noise removal: remove small isolated diff regions ---
+function removeNoiseFromChangeMap(changeMap, typeMap, width, height, minSize) {
+    if (minSize <= 0) return;
+    const visited = new Uint8Array(width * height);
+    const total = width * height;
+
+    for (let i = 0; i < total; i++) {
+        if (!changeMap[i] || visited[i]) continue;
+
+        // BFS to find connected component
+        const queue = [i];
+        visited[i] = 1;
+        const component = [i];
+        let head = 0;
+
+        while (head < queue.length) {
+            const cur = queue[head++];
+            const cx = cur % width, cy = (cur / width) | 0;
+
+            for (const [dx, dy] of [[-1,0],[1,0],[0,-1],[0,1]]) {
+                const nx = cx + dx, ny = cy + dy;
+                if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                    const ni = ny * width + nx;
+                    if (changeMap[ni] && !visited[ni]) {
+                        visited[ni] = 1;
+                        queue.push(ni);
+                        component.push(ni);
+                    }
+                }
+            }
+        }
+
+        // If component is too small, clear it
+        if (component.length <= minSize) {
+            for (const idx of component) {
+                changeMap[idx] = 0;
+                if (typeMap) typeMap[idx] = 0;
+            }
+        }
+    }
+}
+
 // --- Pixel Comparison (with offset, dilation, fade support) ---
 function comparePages(oldCanvas, newCanvas, offsetX = 0, offsetY = 0, opts = {}) {
     const fade = opts.fade !== undefined ? opts.fade : state.fadeAmount;
     const dilate = opts.dilate !== undefined ? opts.dilate : state.dilateChanges;
+    const scaleFactor = opts.scaleFactor !== undefined ? opts.scaleFactor : 1.0;
+    const blurRadius = opts.blurRadius !== undefined ? opts.blurRadius : state.blurRadius;
+    const noiseSize = opts.noiseSize !== undefined ? opts.noiseSize : state.noiseSize;
 
     const width = Math.max(oldCanvas?.width || 0, newCanvas?.width || 0);
     const height = Math.max(oldCanvas?.height || 0, newCanvas?.height || 0);
@@ -309,16 +773,36 @@ function comparePages(oldCanvas, newCanvas, offsetX = 0, offsetY = 0, opts = {})
     oldCtx.fillStyle = "white";
     oldCtx.fillRect(0, 0, width, height);
     if (oldCanvas) oldCtx.drawImage(oldCanvas, 0, 0);
-    const oldData = oldCtx.getImageData(0, 0, width, height);
+    let oldData = oldCtx.getImageData(0, 0, width, height);
 
-    // New canvas data (offset applied)
+    // New canvas data (scale + offset applied)
     const newCtx = document.createElement("canvas").getContext("2d");
     newCtx.canvas.width = width;
     newCtx.canvas.height = height;
     newCtx.fillStyle = "white";
     newCtx.fillRect(0, 0, width, height);
-    if (newCanvas) newCtx.drawImage(newCanvas, offsetX, offsetY);
-    const newData = newCtx.getImageData(0, 0, width, height);
+    if (newCanvas) {
+        if (scaleFactor !== 1.0) {
+            const cw = oldCanvas ? oldCanvas.width : width;
+            const ch = oldCanvas ? oldCanvas.height : height;
+            const cx = cw / 2;
+            const cy = ch / 2;
+            newCtx.translate(cx + offsetX, cy + offsetY);
+            newCtx.scale(scaleFactor, scaleFactor);
+            newCtx.translate(-cx, -cy);
+            newCtx.drawImage(newCanvas, 0, 0);
+            newCtx.setTransform(1, 0, 0, 1, 0, 0);
+        } else {
+            newCtx.drawImage(newCanvas, offsetX, offsetY);
+        }
+    }
+    let newData = newCtx.getImageData(0, 0, width, height);
+
+    // Apply blur pre-processing to reduce anti-aliasing noise
+    if (blurRadius > 0) {
+        oldData = boxBlurImageData(oldData, blurRadius);
+        newData = boxBlurImageData(newData, blurRadius);
+    }
 
     // Result image data
     const tmpCtx = document.createElement("canvas").getContext("2d");
@@ -329,14 +813,15 @@ function comparePages(oldCanvas, newCanvas, offsetX = 0, offsetY = 0, opts = {})
     const oldColoredData = tmpCtx.createImageData(width, height);
     const newColoredData = tmpCtx.createImageData(width, height);
 
-    // Change map for dilation (1 = changed)
-    const changeMap = dilate ? new Uint8Array(width * height) : null;
+    // Change map for noise removal & dilation (1 = changed)
+    const needMap = dilate || noiseSize > 0;
+    const changeMap = needMap ? new Uint8Array(width * height) : null;
     // Type map for dilation coloring (1=deleted, 2=added, 3=modified)
-    const typeMap = dilate ? new Uint8Array(width * height) : null;
+    const typeMap = needMap ? new Uint8Array(width * height) : null;
 
     let diffPixels = 0;
     const totalPixels = width * height;
-    const threshold = 30;
+    const threshold = opts.sensitivity !== undefined ? opts.sensitivity : state.sensitivity;
 
     for (let i = 0; i < oldData.data.length; i += 4) {
         const px = (i / 4) | 0;
@@ -386,6 +871,33 @@ function comparePages(oldCanvas, newCanvas, offsetX = 0, offsetY = 0, opts = {})
             diffOnlyData.data[i] = 255; diffOnlyData.data[i+1] = 255; diffOnlyData.data[i+2] = 255; diffOnlyData.data[i+3] = 255;
             oldColoredData.data[i] = rOld; oldColoredData.data[i+1] = gOld; oldColoredData.data[i+2] = bOld; oldColoredData.data[i+3] = 255;
             newColoredData.data[i] = rNew; newColoredData.data[i+1] = gNew; newColoredData.data[i+2] = bNew; newColoredData.data[i+3] = 255;
+        }
+    }
+
+    // Noise removal: remove small isolated diff regions
+    if (noiseSize > 0 && changeMap) {
+        removeNoiseFromChangeMap(changeMap, typeMap, width, height, noiseSize);
+        // Re-paint removed pixels as unchanged
+        diffPixels = 0;
+        for (let px = 0; px < width * height; px++) {
+            if (changeMap[px]) {
+                diffPixels++;
+            } else if (typeMap[px] === 0) {
+                // Already unchanged — skip
+            } else {
+                // Was marked as changed but noise-removed — revert to unchanged appearance
+                const i = px * 4;
+                // Use original new image for unchanged rendering
+                const rNew = newData.data[i], gNew = newData.data[i+1], bNew = newData.data[i+2];
+                const rOld = oldData.data[i], gOld = oldData.data[i+1], bOld = oldData.data[i+2];
+                const gray = Math.round((rNew + gNew + bNew) / 3);
+                const blended = Math.round(gray * (1 - fade) + 255 * fade);
+                resultData.data[i] = blended; resultData.data[i+1] = blended; resultData.data[i+2] = blended; resultData.data[i+3] = 255;
+                diffOnlyData.data[i] = 255; diffOnlyData.data[i+1] = 255; diffOnlyData.data[i+2] = 255; diffOnlyData.data[i+3] = 255;
+                oldColoredData.data[i] = rOld; oldColoredData.data[i+1] = gOld; oldColoredData.data[i+2] = bOld; oldColoredData.data[i+3] = 255;
+                newColoredData.data[i] = rNew; newColoredData.data[i+1] = gNew; newColoredData.data[i+2] = bNew; newColoredData.data[i+3] = 255;
+                typeMap[px] = 0;
+            }
         }
     }
 
@@ -601,13 +1113,23 @@ function updateChangeNav() {
 }
 
 // --- Render Current Page ---
+// Get mapped page numbers for a given comparison index (1-based)
+function getMappedPages(compIndex) {
+    if (state.pageMapping.length > 0 && compIndex >= 1 && compIndex <= state.pageMapping.length) {
+        const pair = state.pageMapping[compIndex - 1];
+        return { oldPage: pair.oldPage, newPage: pair.newPage };
+    }
+    return { oldPage: compIndex, newPage: compIndex };
+}
+
 async function renderCurrentPage() {
     loading.hidden = false;
     loadingText.textContent = `ページ ${state.currentPage} を比較中...`;
 
     try {
-        const oldCanvas = await renderPageToCanvas(state.oldPdf, state.currentPage);
-        const newCanvas = await renderPageToCanvas(state.newPdf, state.currentPage);
+        const { oldPage, newPage } = getMappedPages(state.currentPage);
+        const oldCanvas = oldPage ? await renderPageToCanvas(state.oldPdf, oldPage) : null;
+        const newCanvas = newPage ? await renderPageToCanvas(state.newPdf, newPage) : null;
 
         state.renderedOldCanvas = oldCanvas;
         state.renderedNewCanvas = newCanvas;
@@ -615,10 +1137,16 @@ async function renderCurrentPage() {
         runComparison();
 
         // UI
-        pageInfo.textContent = `${state.currentPage} / ${state.totalPages}`;
+        const { oldPage: dispOld, newPage: dispNew } = getMappedPages(state.currentPage);
+        const pageLabel = dispOld && dispNew
+            ? `旧P${dispOld} ⇔ 新P${dispNew}`
+            : dispOld ? `旧P${dispOld} (削除)`
+            : dispNew ? `新P${dispNew} (新規)` : "";
+        pageInfo.textContent = `${state.currentPage}/${state.totalPages} [${pageLabel}]`;
         btnPrev.disabled = state.currentPage <= 1;
         btnNext.disabled = state.currentPage >= state.totalPages;
         updateAdjustDisplay();
+        updateScaleSlider();
         updateActiveThumbnail();
     } catch (err) {
         alert("ページの比較中にエラーが発生しました: " + err.message);
@@ -632,11 +1160,12 @@ function runComparison() {
     const oldCanvas = state.renderedOldCanvas;
     const newCanvas = state.renderedNewCanvas;
     const offset = getPageOffset(state.currentPage);
-    const canvasOffsetX = Math.round(offset.x * state.scale);
-    const canvasOffsetY = Math.round(offset.y * state.scale);
+    const canvasOffsetX = offset.x;
+    const canvasOffsetY = offset.y;
+    const scaleFactor = getPageScale(state.currentPage);
 
     const { resultData, diffOnlyData, oldColoredData, newColoredData, width, height, percent } =
-        comparePages(oldCanvas, newCanvas, canvasOffsetX, canvasOffsetY);
+        comparePages(oldCanvas, newCanvas, canvasOffsetX, canvasOffsetY, { scaleFactor });
 
     canvasResult.width = width;
     canvasResult.height = height;
@@ -775,10 +1304,12 @@ btnNext.addEventListener("click", () => {
 
 btnBack.addEventListener("click", () => {
     resultSection.hidden = true;
+    mappingSection.hidden = true;
     uploadSection.hidden = false;
     document.body.classList.remove("comparing");
     state.oldPdf = null;
     state.newPdf = null;
+    state.pageMapping = [];
     state.pageChangeData = [];
     thumbnailList.innerHTML = "";
     changeSummary.textContent = "";
@@ -864,18 +1395,13 @@ canvasViewport.addEventListener("mousedown", (e) => {
 
 document.addEventListener("mousemove", (e) => {
     if (state.isAdjusting) {
-        const dx = (e.clientX - state.adjustStartX) / state.zoom;
-        const dy = (e.clientY - state.adjustStartY) / state.zoom;
+        const dx = (e.clientX - state.adjustStartX) * state.scale / state.zoom;
+        const dy = (e.clientY - state.adjustStartY) * state.scale / state.zoom;
         const newOffset = {
             x: state.adjustStartOffsetX + dx,
             y: state.adjustStartOffsetY + dy,
         };
         state.pageOffsets[state.currentPage] = newOffset;
-        if (state.applyOffsetToAll) {
-            for (let p = 1; p <= state.totalPages; p++) {
-                state.pageOffsets[p] = { ...newOffset };
-            }
-        }
         updateAdjustDisplay();
         renderAdjustPreview();
     } else if (state.isPanning) {
@@ -920,28 +1446,19 @@ btnAdjust.addEventListener("click", () => {
 
 btnAdjustReset.addEventListener("click", () => {
     state.pageOffsets[state.currentPage] = { x: 0, y: 0 };
-    if (state.applyOffsetToAll) {
-        for (let p = 1; p <= state.totalPages; p++) {
-            state.pageOffsets[p] = { x: 0, y: 0 };
-        }
-    }
+    state.pageScales[state.currentPage] = 1.0;
+    updateScaleSlider();
     updateAdjustDisplay();
     runComparison();
 });
 
-chkApplyAll.addEventListener("change", () => {
-    state.applyOffsetToAll = chkApplyAll.checked;
-    if (state.applyOffsetToAll) {
-        const offset = getPageOffset(state.currentPage);
-        for (let p = 1; p <= state.totalPages; p++) {
-            state.pageOffsets[p] = { ...offset };
-        }
-    }
-});
-
 function updateAdjustDisplay() {
     const offset = getPageOffset(state.currentPage);
-    adjustOffset.textContent = `X: ${Math.round(offset.x)}　Y: ${Math.round(offset.y)}`;
+    const scale = getPageScale(state.currentPage);
+    const scaleText = scale !== 1.0 ? `　縮尺: ${(scale * 100).toFixed(1)}%` : "";
+    const dispX = Math.round(offset.x / state.scale);
+    const dispY = Math.round(offset.y / state.scale);
+    adjustOffset.textContent = `X: ${dispX}　Y: ${dispY}${scaleText}`;
 }
 
 // Lightweight preview during drag
@@ -951,8 +1468,9 @@ function renderAdjustPreview() {
     const oldC = state.renderedOldCanvas;
     const newC = state.renderedNewCanvas;
     const offset = getPageOffset(state.currentPage);
-    const ox = Math.round(offset.x * state.scale);
-    const oy = Math.round(offset.y * state.scale);
+    const ox = offset.x;
+    const oy = offset.y;
+    const sf = getPageScale(state.currentPage);
 
     const width = Math.max(oldC?.width || 0, newC?.width || 0);
     const height = Math.max(oldC?.height || 0, newC?.height || 0);
@@ -969,7 +1487,20 @@ function renderAdjustPreview() {
     ctx.globalAlpha = 0.5;
     if (oldC) ctx.drawImage(oldC, 0, 0);
     ctx.globalAlpha = 0.5;
-    if (newC) ctx.drawImage(newC, ox, oy);
+    if (newC) {
+        if (sf !== 1.0) {
+            const cw = oldC ? oldC.width : width;
+            const ch = oldC ? oldC.height : height;
+            const cx = cw / 2, cy = ch / 2;
+            ctx.translate(cx + ox, cy + oy);
+            ctx.scale(sf, sf);
+            ctx.translate(-cx, -cy);
+            ctx.drawImage(newC, 0, 0);
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+        } else {
+            ctx.drawImage(newC, ox, oy);
+        }
+    }
     ctx.globalAlpha = 1.0;
 
     viewOverlay.hidden = false;
@@ -977,42 +1508,27 @@ function renderAdjustPreview() {
     applyZoomToCanvases();
 }
 
-// --- Auto-Alignment ---
-btnAutoAlign.addEventListener("click", () => {
-    if (!state.renderedOldCanvas || !state.renderedNewCanvas) return;
+// --- Auto Fit (position + scale) ---
+const btnAutoFit = $("btn-auto-fit");
+const btnAutoFitAll = $("btn-auto-fit-all");
+const scaleSlider = $("scale-slider");
+const scaleValue = $("scale-value");
 
-    loading.hidden = false;
-    loadingText.textContent = "自動位置合わせ中...";
+function updateScaleSlider() {
+    const sf = getPageScale(state.currentPage);
+    scaleSlider.value = Math.round(sf * 1000);
+    scaleValue.textContent = `${(sf * 100).toFixed(1)}%`;
+}
 
-    // Use setTimeout to allow the loading overlay to render
-    setTimeout(() => {
-        try {
-            const offset = autoAlignPages(state.renderedOldCanvas, state.renderedNewCanvas);
-            state.pageOffsets[state.currentPage] = offset;
-            if (state.applyOffsetToAll) {
-                for (let p = 1; p <= state.totalPages; p++) {
-                    state.pageOffsets[p] = { ...offset };
-                }
-            }
-            updateAdjustDisplay();
-            runComparison();
-        } catch (err) {
-            alert("自動位置合わせに失敗しました: " + err.message);
-        } finally {
-            loading.hidden = true;
-        }
-    }, 50);
-});
-
-function autoAlignPages(oldCanvas, newCanvas) {
-    // 二値化コンテンツマッチング: 構造図面向けに最適化
-    // 白背景に黒い線の図面では、線の一致度で位置を合わせる
-    const targetWidth = 500;
+// 統合自動合わせアルゴリズム: 位置＋縮尺を同時に最適化
+// 戻り値の offsetX/offsetY は canvas pixel 単位 (state.scale 掛け済み)
+function autoFitPages(oldCanvas, newCanvas) {
+    const targetWidth = 600;
     const scaleDown = targetWidth / Math.max(oldCanvas.width, 1);
     const tw = Math.round(oldCanvas.width * scaleDown);
     const th = Math.round(oldCanvas.height * scaleDown);
 
-    function downsampleBinary(canvas) {
+    function getImageBinary(canvas, tw, th) {
         const c = document.createElement("canvas");
         c.width = tw; c.height = th;
         const ctx = c.getContext("2d");
@@ -1021,24 +1537,40 @@ function autoAlignPages(oldCanvas, newCanvas) {
         const binary = new Uint8Array(tw * th);
         for (let i = 0; i < tw * th; i++) {
             const gray = data[i*4] * 0.299 + data[i*4+1] * 0.587 + data[i*4+2] * 0.114;
-            binary[i] = gray < 200 ? 1 : 0; // コンテンツ(線)=1, 背景=0
+            binary[i] = gray < 200 ? 1 : 0;
         }
         return binary;
     }
 
-    const bOld = downsampleBinary(oldCanvas);
-    const bNew = downsampleBinary(newCanvas);
+    function getScaledBinary(canvas, scaleFactor) {
+        const c = document.createElement("canvas");
+        c.width = tw; c.height = th;
+        const ctx = c.getContext("2d");
+        ctx.fillStyle = "white";
+        ctx.fillRect(0, 0, tw, th);
+        const cx = tw / 2, cy = th / 2;
+        ctx.translate(cx, cy);
+        ctx.scale(scaleFactor, scaleFactor);
+        ctx.translate(-cx, -cy);
+        ctx.drawImage(canvas, 0, 0, tw, th);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        const data = ctx.getImageData(0, 0, tw, th).data;
+        const binary = new Uint8Array(tw * th);
+        for (let i = 0; i < tw * th; i++) {
+            const gray = data[i*4] * 0.299 + data[i*4+1] * 0.587 + data[i*4+2] * 0.114;
+            binary[i] = gray < 200 ? 1 : 0;
+        }
+        return binary;
+    }
 
-    // コンテンツが少なすぎる場合は位置合わせ不要
+    const bOld = getImageBinary(oldCanvas, tw, th);
+
+    // コンテンツが少なすぎる場合はスキップ
     let contentCount = 0;
     for (let i = 0; i < bOld.length; i++) contentCount += bOld[i];
-    if (contentCount < 50) return { x: 0, y: 0 };
+    if (contentCount < 50) return { scale: 1.0, offsetX: 0, offsetY: 0 };
 
-    const searchRange = 30;
-    let bestScore = -1, bestOx = 0, bestOy = 0;
-
-    // コンテンツピクセルの一致率を最大化
-    function calcMatchScore(ox, oy) {
+    function calcMatchScore(bNew, ox, oy) {
         let matches = 0, total = 0;
         const yStart = Math.max(0, -oy), yEnd = Math.min(th, th - oy);
         const xStart = Math.max(0, -ox), xEnd = Math.min(tw, tw - ox);
@@ -1055,29 +1587,151 @@ function autoAlignPages(oldCanvas, newCanvas) {
         return total > 0 ? matches / total : 0;
     }
 
-    // 粗い探索 (2px刻み)
-    for (let oy = -searchRange; oy <= searchRange; oy += 2) {
-        for (let ox = -searchRange; ox <= searchRange; ox += 2) {
-            const score = calcMatchScore(ox, oy);
-            if (score > bestScore) { bestScore = score; bestOx = ox; bestOy = oy; }
+    let bestScore = -1, bestScale = 1.0, bestOx = 0, bestOy = 0;
+    const posRange = 40;
+
+    // Phase 1: 粗い探索 — 縮尺1%刻み × 位置5px刻み
+    for (let s = 930; s <= 1070; s += 10) {
+        const sf = s / 1000;
+        const bNew = getScaledBinary(newCanvas, sf);
+        for (let oy = -posRange; oy <= posRange; oy += 5) {
+            for (let ox = -posRange; ox <= posRange; ox += 5) {
+                const score = calcMatchScore(bNew, ox, oy);
+                if (score > bestScore) {
+                    bestScore = score; bestScale = sf; bestOx = ox; bestOy = oy;
+                }
+            }
         }
     }
 
-    // 精密探索 (1px刻み)
-    const coarseOx = bestOx, coarseOy = bestOy;
-    for (let oy = coarseOy - 3; oy <= coarseOy + 3; oy++) {
-        for (let ox = coarseOx - 3; ox <= coarseOx + 3; ox++) {
-            const score = calcMatchScore(ox, oy);
-            if (score > bestScore) { bestScore = score; bestOx = ox; bestOy = oy; }
+    // Phase 2: 中間探索 — 縮尺0.3%刻み × 位置2px刻み
+    const midScale = Math.round(bestScale * 1000);
+    const midOx = bestOx, midOy = bestOy;
+    for (let s = midScale - 15; s <= midScale + 15; s += 3) {
+        const sf = s / 1000;
+        const bNew = getScaledBinary(newCanvas, sf);
+        for (let oy = midOy - 10; oy <= midOy + 10; oy += 2) {
+            for (let ox = midOx - 10; ox <= midOx + 10; ox += 2) {
+                const score = calcMatchScore(bNew, ox, oy);
+                if (score > bestScore) {
+                    bestScore = score; bestScale = sf; bestOx = ox; bestOy = oy;
+                }
+            }
         }
     }
 
-    // ダウンサンプル座標 → CSS pixel座標に変換
+    // Phase 3: 精密探索 — 縮尺0.1%刻み × 位置1px刻み
+    const fineScale = Math.round(bestScale * 1000);
+    const fineOx = bestOx, fineOy = bestOy;
+    for (let s = fineScale - 5; s <= fineScale + 5; s += 1) {
+        const sf = s / 1000;
+        const bNew = getScaledBinary(newCanvas, sf);
+        for (let oy = fineOy - 4; oy <= fineOy + 4; oy++) {
+            for (let ox = fineOx - 4; ox <= fineOx + 4; ox++) {
+                const score = calcMatchScore(bNew, ox, oy);
+                if (score > bestScore) {
+                    bestScore = score; bestScale = sf; bestOx = ox; bestOy = oy;
+                }
+            }
+        }
+    }
+
+    // ダウンサンプル座標 → canvas pixel座標に変換 (丸め誤差を最小化)
     return {
-        x: Math.round(bestOx / scaleDown / state.scale),
-        y: Math.round(bestOy / scaleDown / state.scale),
+        scale: bestScale,
+        offsetX: bestOx / scaleDown,
+        offsetY: bestOy / scaleDown,
     };
 }
+
+// 現ページのみ自動合わせ
+btnAutoFit.addEventListener("click", () => {
+    if (!state.renderedOldCanvas || !state.renderedNewCanvas) return;
+    loading.hidden = false;
+    loadingText.textContent = "自動合わせ中...";
+    setTimeout(() => {
+        try {
+            const result = autoFitPages(state.renderedOldCanvas, state.renderedNewCanvas);
+            state.pageScales[state.currentPage] = result.scale;
+            state.pageOffsets[state.currentPage] = { x: result.offsetX, y: result.offsetY };
+            updateScaleSlider();
+            updateAdjustDisplay();
+            runComparison();
+        } catch (err) {
+            alert("自動合わせに失敗しました: " + err.message);
+        } finally {
+            loading.hidden = true;
+        }
+    }, 50);
+});
+
+// 全ページ自動合わせ
+btnAutoFitAll.addEventListener("click", () => {
+    if (!state.oldPdf || !state.newPdf) return;
+    loading.hidden = false;
+
+    async function processAllPages() {
+        try {
+            for (let p = 1; p <= state.totalPages; p++) {
+                loadingText.textContent = `自動合わせ中... (${p}/${state.totalPages})`;
+                // yield to UI
+                await new Promise(r => setTimeout(r, 20));
+
+                const { oldPage: afOld, newPage: afNew } = getMappedPages(p);
+                const oldC = afOld ? await renderPageToCanvas(state.oldPdf, afOld) : null;
+                const newC = afNew ? await renderPageToCanvas(state.newPdf, afNew) : null;
+                if (!oldC || !newC) {
+                    state.pageScales[p] = 1.0;
+                    state.pageOffsets[p] = { x: 0, y: 0 };
+                    continue;
+                }
+                const result = autoFitPages(oldC, newC);
+                state.pageScales[p] = result.scale;
+                state.pageOffsets[p] = { x: result.offsetX, y: result.offsetY };
+            }
+            // 現ページを再描画
+            updateScaleSlider();
+            updateAdjustDisplay();
+            runComparison();
+            // サムネイル再生成
+            generateThumbnails();
+        } catch (err) {
+            alert("自動合わせに失敗しました: " + err.message);
+        } finally {
+            loading.hidden = true;
+        }
+    }
+    processAllPages();
+});
+
+// Manual scale slider
+scaleSlider.addEventListener("input", () => {
+    const sf = scaleSlider.value / 1000;
+    state.pageScales[state.currentPage] = sf;
+    scaleValue.textContent = `${(sf * 100).toFixed(1)}%`;
+    updateAdjustDisplay();
+    runComparison();
+});
+
+// --- Sensitivity Control ---
+const sensitivitySlider = $("sensitivity-slider");
+const sensitivityNumber = $("sensitivity-number");
+
+sensitivitySlider.addEventListener("input", () => {
+    state.sensitivity = parseInt(sensitivitySlider.value);
+    sensitivityNumber.value = state.sensitivity;
+    runComparison();
+});
+
+sensitivityNumber.addEventListener("change", () => {
+    let val = parseInt(sensitivityNumber.value);
+    if (isNaN(val)) { sensitivityNumber.value = state.sensitivity; return; }
+    val = Math.max(10, Math.min(765, val));
+    sensitivityNumber.value = val;
+    state.sensitivity = val;
+    sensitivitySlider.value = val;
+    runComparison();
+});
 
 // --- Display Options ---
 fadeSlider.addEventListener("input", () => {
@@ -1087,6 +1741,26 @@ fadeSlider.addEventListener("input", () => {
 
 chkDilate.addEventListener("change", () => {
     state.dilateChanges = chkDilate.checked;
+    runComparison();
+});
+
+// Blur slider
+const blurSlider = $("blur-slider");
+const blurValue = $("blur-value");
+
+blurSlider.addEventListener("input", () => {
+    state.blurRadius = parseInt(blurSlider.value) / 10;
+    blurValue.textContent = state.blurRadius.toFixed(1);
+    runComparison();
+});
+
+// Noise slider
+const noiseSlider = $("noise-slider");
+const noiseValue = $("noise-value");
+
+noiseSlider.addEventListener("input", () => {
+    state.noiseSize = parseInt(noiseSlider.value);
+    noiseValue.textContent = state.noiseSize;
     runComparison();
 });
 
@@ -1108,7 +1782,9 @@ function generateThumbnails() {
 
         const label = document.createElement("div");
         label.className = "thumb-label";
-        label.innerHTML = `<span class="thumb-page-num">P${p}</span><span class="thumb-change-dot pending"></span>`;
+        const { oldPage: tOld, newPage: tNew } = getMappedPages(p);
+        const thumbLabel = tOld && tNew ? `旧${tOld}⇔新${tNew}` : tOld ? `旧${tOld}(削除)` : `新${tNew}(新規)`;
+        label.innerHTML = `<span class="thumb-page-num">${thumbLabel}</span><span class="thumb-change-dot pending"></span>`;
         item.appendChild(label);
 
         item.addEventListener("click", () => {
@@ -1131,14 +1807,16 @@ async function generateThumbnailBatch(startPage) {
     for (let p = startPage; p <= endPage; p++) {
         try {
             const thumbScale = 0.3;
-            const oldC = await renderPageToCanvas(state.oldPdf, p, thumbScale);
-            const newC = await renderPageToCanvas(state.newPdf, p, thumbScale);
+            const { oldPage, newPage } = getMappedPages(p);
+            const oldC = oldPage ? await renderPageToCanvas(state.oldPdf, oldPage, thumbScale) : null;
+            const newC = newPage ? await renderPageToCanvas(state.newPdf, newPage, thumbScale) : null;
 
             const offset = getPageOffset(p);
-            const ox = Math.round(offset.x * thumbScale);
-            const oy = Math.round(offset.y * thumbScale);
+            const ox = Math.round(offset.x * thumbScale / state.scale);
+            const oy = Math.round(offset.y * thumbScale / state.scale);
+            const sf = getPageScale(p);
 
-            const result = comparePages(oldC, newC, ox, oy, { fade: 0.7, dilate: false });
+            const result = comparePages(oldC, newC, ox, oy, { fade: 0.7, dilate: false, scaleFactor: sf });
             const hasChanges = parseFloat(result.percent) > 0;
 
             state.pageChangeData[p - 1] = { hasChanges, percent: result.percent };
@@ -1250,11 +1928,12 @@ btnExportPdf.addEventListener("click", async () => {
                 pdf.addPage([pageWidth, pageHeight], pageWidth > pageHeight ? "landscape" : "portrait");
             }
 
-            const oldCanvas = await renderPageToCanvas(state.oldPdf, p);
-            const newCanvas = await renderPageToCanvas(state.newPdf, p);
+            const { oldPage: expOld, newPage: expNew } = getMappedPages(p);
+            const oldCanvas = expOld ? await renderPageToCanvas(state.oldPdf, expOld) : null;
+            const newCanvas = expNew ? await renderPageToCanvas(state.newPdf, expNew) : null;
             const offset = getPageOffset(p);
-            const canvasOffsetX = Math.round(offset.x * state.scale);
-            const canvasOffsetY = Math.round(offset.y * state.scale);
+            const canvasOffsetX = offset.x;
+            const canvasOffsetY = offset.y;
 
             let exportCanvas;
             if (state.mode === "sidebyside") {
@@ -1269,7 +1948,8 @@ btnExportPdf.addEventListener("click", async () => {
                 if (oldCanvas) ctx.drawImage(oldCanvas, 0, 0);
                 if (newCanvas) ctx.drawImage(newCanvas, (oldCanvas?.width || 0) + 20, 0);
             } else {
-                const result = comparePages(oldCanvas, newCanvas, canvasOffsetX, canvasOffsetY);
+                const exportScaleFactor = getPageScale(p);
+                const result = comparePages(oldCanvas, newCanvas, canvasOffsetX, canvasOffsetY, { scaleFactor: exportScaleFactor });
                 exportCanvas = document.createElement("canvas");
                 exportCanvas.width = result.width;
                 exportCanvas.height = result.height;
@@ -1304,7 +1984,7 @@ document.addEventListener("keydown", (e) => {
 
     // Adjust mode arrow keys
     if (state.adjustMode) {
-        const step = e.shiftKey ? 10 : 1;
+        const step = (e.shiftKey ? 10 : 1) * state.scale;
         const offset = getPageOffset(state.currentPage);
         let changed = false;
         let newOffset = { ...offset };
@@ -1316,11 +1996,6 @@ document.addEventListener("keydown", (e) => {
 
         if (changed) {
             state.pageOffsets[state.currentPage] = newOffset;
-            if (state.applyOffsetToAll) {
-                for (let p = 1; p <= state.totalPages; p++) {
-                    state.pageOffsets[p] = { ...newOffset };
-                }
-            }
             updateAdjustDisplay();
             runComparison();
             return;

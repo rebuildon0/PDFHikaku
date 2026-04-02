@@ -71,6 +71,36 @@
             <p class="privacy-note">ファイルはブラウザ内で処理されます。サーバーへの送信は一切ありません。</p>
         </section>
 
+        <!-- ページ対応設定エリア -->
+        <section id="mapping-section" hidden>
+            <div class="mapping-container">
+                <div class="mapping-header">
+                    <h2>ページ対応設定</h2>
+                    <p class="mapping-desc">旧PDFと新PDFのページを対応づけてください。対応するページがない場合は「なし」を選択します。</p>
+                </div>
+                <div class="mapping-actions-top">
+                    <button id="btn-auto-match" class="btn-secondary">自動マッチング</button>
+                    <button id="btn-add-pair" class="btn-secondary">+ ペア追加</button>
+                    <button id="btn-reset-mapping" class="btn-secondary">リセット</button>
+                    <span class="opt-sep">|</span>
+                    <label class="opt-label" title="プレビューサイズ">プレビュー
+                        <button id="btn-thumb-smaller" class="btn-icon btn-xs">−</button>
+                        <span id="thumb-size-label">M</span>
+                        <button id="btn-thumb-larger" class="btn-icon btn-xs">+</button>
+                    </label>
+                </div>
+                <div class="mapping-loading" id="mapping-loading" hidden>
+                    <div class="spinner-sm"></div>
+                    <span>ページを解析中...</span>
+                </div>
+                <div id="mapping-list" class="mapping-list"></div>
+                <div class="mapping-actions-bottom">
+                    <button id="btn-mapping-back" class="btn-secondary">← 戻る</button>
+                    <button id="btn-mapping-confirm" class="btn-primary">この対応で比較を開始</button>
+                </div>
+            </div>
+        </section>
+
         <!-- 結果表示エリア -->
         <section id="result-section" hidden>
             <div class="result-layout">
@@ -142,6 +172,11 @@
                             <span class="opt-sep">|</span>
                             <label class="opt-label" title="未変更部分の表示濃度">背景 <input type="range" id="fade-slider" min="0" max="100" value="70" class="fade-slider"></label>
                             <label class="opt-label" title="変更箇所を太く表示"><input type="checkbox" id="chk-dilate" checked> 太く表示</label>
+                            <span class="opt-sep">|</span>
+                            <label class="opt-label" title="変更検出の感度 (低い=厳しい/高い=緩い)">感度 <input type="range" id="sensitivity-slider" min="10" max="765" value="30" class="sensitivity-slider"> <input type="number" id="sensitivity-number" min="10" max="765" value="30" class="sensitivity-number"></label>
+                            <span class="opt-sep">|</span>
+                            <label class="opt-label" title="前処理ぼかし (アンチエイリアスノイズ低減)">ぼかし <input type="range" id="blur-slider" min="0" max="50" value="10" step="1" class="blur-slider"> <span id="blur-value">1.0</span></label>
+                            <label class="opt-label" title="ノイズ除去 (この面積以下の小さな差分を無視)">ノイズ除去 <input type="range" id="noise-slider" min="0" max="50" value="4" class="noise-slider"> <span id="noise-value">4</span></label>
                         </div>
                     </div>
 
@@ -150,8 +185,9 @@
                         <span class="adjust-icon">↕↔</span>
                         <span class="adjust-info">位置: <strong id="adjust-offset">X: 0　Y: 0</strong></span>
                         <button id="btn-adjust-reset" class="btn-secondary btn-xs">リセット</button>
-                        <button id="btn-auto-align" class="btn-secondary btn-xs">自動位置合わせ</button>
-                        <label class="opt-label"><input type="checkbox" id="chk-apply-all"> 全ページに適用</label>
+                        <button id="btn-auto-fit" class="btn-secondary btn-xs btn-auto-fit">自動合わせ (現ページ)</button>
+                        <button id="btn-auto-fit-all" class="btn-secondary btn-xs btn-auto-fit">自動合わせ (全ページ)</button>
+                        <label class="opt-label" title="新図面の縮尺を手動調整">縮尺 <input type="range" id="scale-slider" min="900" max="1100" value="1000" class="scale-slider"> <span id="scale-value">100.0%</span></label>
                         <span class="adjust-hint">ドラッグ / 矢印1px / Shift+矢印10px</span>
                     </div>
 
@@ -213,6 +249,14 @@
                         <tr><td><strong>差分のみ</strong></td><td>変更箇所だけを白背景に表示</td></tr>
                         <tr><td><strong>旧図面</strong></td><td>旧図面に変更箇所を赤/青で強調</td></tr>
                         <tr><td><strong>新図面</strong></td><td>新図面に変更箇所を赤/青で強調</td></tr>
+                    </table>
+                </div>
+                <div class="help-section">
+                    <h3>縮尺・感度の調整</h3>
+                    <table class="help-table">
+                        <tr><td><strong>感度スライダー</strong></td><td>変更検出の閾値を調整。値を大きくすると微小な差異を無視します</td></tr>
+                        <tr><td><strong>自動縮尺合わせ</strong></td><td>位置調整モードで使用。新旧PDFの縮尺差を自動検出・補正します</td></tr>
+                        <tr><td><strong>縮尺スライダー</strong></td><td>位置調整モードで使用。新図面の縮尺を手動で微調整できます</td></tr>
                     </table>
                 </div>
                 <div class="help-section">
